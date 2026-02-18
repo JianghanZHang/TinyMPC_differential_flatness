@@ -1,0 +1,1 @@
+The Cheat Sheets should just be clean, clear, precise, explicit MATH, with the CODE (can be like API doc or/and code snippets)

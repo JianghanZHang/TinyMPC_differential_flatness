@@ -1,0 +1,42 @@
+\title{TinyMPC with Differential Flatness:\\
+  $\alpha$-Parameterized Templates for Efficient Quadrotor Control}
+
+\author{
+  \IEEEauthorblockN{Jianghan Zhang}
+  \IEEEauthorblockA{Dartmouth College\\
+  \texttt{jianghan.zhang.gr@dartmouth.edu}}
+}
+
+\maketitle
+
+% ================================================================
+\begin{abstract}
+TinyMPC enables real-time model-predictive control on microcontrollers
+by caching the infinite-horizon Riccati solution and requiring
+only matrix--vector products at each ADMM iteration.
+However, its linearization is fixed at a single operating point
+(typically hover), which degrades tracking performance for aggressive
+trajectories.
+We exploit the \emph{differential flatness} of quadrotor dynamics
+to reparameterize the linearization by a flat parameter
+$\balpha = (a_x, a_y, a_z, \psi)$.
+This yields closed-form equilibria and Jacobians---no automatic
+differentiation required---making the computation FPGA-portable.
+We present three extensions of TinyMPC:
+(i)~\emph{Flat Template MPC}, which precomputes DARE caches at a grid
+of $\balpha$ values for online nearest-neighbor lookup;
+(ii)~\emph{Analytic Template}, a zero-iteration state-feedback
+controller using first-order gain interpolation (${\sim}260$
+arithmetic operations per control output);
+and (iii)~\emph{Barrier-Augmented Template}, which absorbs
+log-barrier constraint information into the DARE cache so
+that the zero-iteration controller is inherently constraint-aware,
+with optional Newton--IPM refinement at quadratic convergence.
+Preliminary Python simulations on a Crazyflie-scale quadrotor show
+that, on figure-eight trajectory tracking,
+the Flat Template achieves tracking accuracy within 6\% of
+online relinearization ($0.035$\,m average position error)
+at $29\times$ lower wall-clock time,
+while the Analytic Template maintains $0.036$\,m error with
+zero ADMM iterations.
+\end{abstract}

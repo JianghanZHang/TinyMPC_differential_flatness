@@ -1,0 +1,1625 @@
+% ============================================================
+%  TinyMPC + Differential Flatness: Complete Cheat Sheet
+%  Jianghan Zhang, 2026
+%  5-variant hierarchy: Online Relin → Flat Template → Barrier → Analytic → Gain Schedule
+% ============================================================
+\documentclass[11pt]{article}
+
+% ── packages ──
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{algorithm2e}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{listings}
+\usepackage{xcolor}
+
+% ── listing style ──
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue!70!black}\bfseries,
+  commentstyle=\color{green!50!black}\itshape,
+  stringstyle=\color{red!60!black},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=5pt,
+  frame=single,
+  breaklines=true,
+  columns=fullflexible,
+  showstringspaces=false,
+  tabsize=4,
+}
+
+% ── theorem environments ──
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{remark}[theorem]{Remark}
+\newtheorem{assumption}[theorem]{Assumption}
+
+% ── notation ──
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\SO}{\mathrm{SO}}
+\newcommand{\SE}{\mathrm{SE}}
+\newcommand{\rank}{\mathrm{rank}}
+\newcommand{\diag}{\mathrm{diag}}
+\newcommand{\clip}{\mathrm{clip}}
+\newcommand{\prox}{\mathrm{prox}}
+\newcommand{\spec}{\mathrm{spec}}
+\newcommand{\tr}{\mathrm{tr}}
+\newcommand{\ip}[2]{\langle #1,\, #2 \rangle}
+\newcommand{\norm}[1]{\|#1\|}
+\newcommand{\trans}{\mathsf{T}}
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator{\vect}{vec}
+
+\title{\textbf{TinyMPC + Differential Flatness}:\\
+Complete Cheat Sheet (5-Variant Hierarchy)}
+\author{Jianghan Zhang}
+\date{February 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+TinyMPC solves linear MPC via ADMM with offline-cached
+Riccati matrices, achieving microcontroller-grade speed
+at the cost of a fixed linearisation point.
+We observe that for differentially flat systems
+the linearisation is a smooth function of
+the flat output and its derivatives---a
+low-dimensional parameter $\alpha\in\R^d$
+(e.g.\ $d=4$ for a quadrotor).
+This gives a family of controllers forming a
+\textbf{complexity cascade}:
+\begin{center}
+\small
+Online Relin $\xrightarrow{\text{cache}}$
+Flat Template $\xrightarrow{K\to 0}$
+Barrier Templ.\ $\xrightarrow{\mu\to 0}$
+Analytic Templ.\ $\xrightarrow{\text{1st order}}$
+Gain Schedule
+\end{center}
+Moving down the cascade trades constraint fidelity
+for real-time guarantees, from $O(n^3)$ online NMPC
+to ${\sim}260$-operation deterministic feedback.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{TinyMPC Formulation}\label{sec:tinympc}
+% ============================================================
+
+We follow the formulation of \cite{tinympc}.
+
+\subsection{Problem}
+
+Given discrete-time linear dynamics
+\begin{equation}\label{eq:dynamics}
+  x_{k+1} = A\,x_k + B\,u_k,
+  \qquad x_k \in \R^n,\; u_k \in \R^m,
+\end{equation}
+TinyMPC solves the finite-horizon constrained LQR:
+\begin{equation}\label{eq:mpc}
+\begin{aligned}
+  \min_{x,u} \quad
+    & \sum_{k=0}^{N-1}
+      \Bigl(\tfrac{1}{2}x_k^\trans Q\, x_k
+      + \tfrac{1}{2}u_k^\trans R\, u_k
+      + q^\trans x_k + r^\trans u_k\Bigr)
+      + \tfrac{1}{2}x_N^\trans Q_f\, x_N
+      + q_f^\trans x_N \\
+  \text{s.t.} \quad
+    & x_{k+1} = A\,x_k + B\,u_k,
+      \qquad k = 0,\ldots,N{-}1, \\
+    & x_{\min} \le x_k \le x_{\max}, \\
+    & u_{\min} \le u_k \le u_{\max},
+\end{aligned}
+\end{equation}
+with $Q, Q_f \succeq 0$, $R \succ 0$.
+
+\subsection{ADMM solver}\label{ssec:admm}
+
+Introduce slack variables $v = (v_x, v_u)$
+to decouple dynamics from box constraints.
+The augmented Lagrangian with penalty $\rho > 0$ is
+\begin{equation}\label{eq:auglag}
+  \mathcal{L}_\rho
+  = J(x,u) + \sum_k \Bigl(
+    \lambda_{x,k}^\trans(x_k - v_{x,k})
+    + \lambda_{u,k}^\trans(u_k - v_{u,k})
+    + \tfrac{\rho}{2}\norm{x_k - v_{x,k}}^2
+    + \tfrac{\rho}{2}\norm{u_k - v_{u,k}}^2
+  \Bigr).
+\end{equation}
+
+Each ADMM iteration:
+\begin{enumerate}[label=(\roman*), leftmargin=8mm]
+  \item \textbf{Primal update}
+    (Riccati backward pass).
+    Solve the unconstrained LQR with shifted cost:
+    \begin{equation}\label{eq:riccati}
+    \begin{aligned}
+      & P_N = Q_f + \rho\, I, \\
+      & K_k = (R + \rho\, I + B^\trans P_{k+1}\, B)^{-1}
+              B^\trans P_{k+1}\, A, \\
+      & P_k = Q + \rho\, I + A^\trans P_{k+1}\, A
+              - A^\trans P_{k+1}\, B\, K_k.
+    \end{aligned}
+    \end{equation}
+    The gain $K_k$ and the affine term
+    $d_k = (R + \rho\, I + B^\trans P_{k+1}\, B)^{-1}
+    (B^\trans p_{k+1} + r + \rho\,(v_{u,k} - \lambda_{u,k}/\rho))$
+    produce the primal trajectory via forward rollout:
+    $u_k = -K_k\, x_k - d_k$,
+    $x_{k+1} = A\,x_k + B\,u_k$.
+
+  \item \textbf{Slack update}
+    (element-wise projection):
+    \begin{equation}\label{eq:slack}
+      v_{x,k} = \clip(x_k + \lambda_{x,k}/\rho,\;
+                       x_{\min},\; x_{\max}),
+      \qquad
+      v_{u,k} = \clip(u_k + \lambda_{u,k}/\rho,\;
+                       u_{\min},\; u_{\max}).
+    \end{equation}
+
+  \item \textbf{Dual update}:
+    \begin{equation}\label{eq:dual}
+      \lambda_{x,k} \mathrel{+}= \rho\,(x_k - v_{x,k}),
+      \qquad
+      \lambda_{u,k} \mathrel{+}= \rho\,(u_k - v_{u,k}).
+    \end{equation}
+\end{enumerate}
+
+\begin{remark}[Offline cache]\label{rem:cache}
+When $A, B, Q, R, \rho$ are fixed,
+the Riccati matrices $\{P_k, K_k\}$ converge
+to steady-state values $P_\infty, K_\infty$
+as $N \to \infty$.
+TinyMPC precomputes and caches $P_\infty, K_\infty$
+and the matrix
+$C_\infty := (R + \rho\, I + B^\trans P_\infty\, B)^{-1}$
+offline.
+Online cost: one forward pass (matrix--vector products)
+$+$ two element-wise projections $+$ one dual update.
+No matrix inversions at runtime.
+\end{remark}
+
+\subsection{Limitation: fixed linearisation}
+
+For a nonlinear system $x_{k+1} = f(x_k, u_k)$,
+TinyMPC uses a single linearisation
+\begin{equation}\label{eq:fixed-lin}
+  A = \frac{\partial f}{\partial x}\bigg|_{(\bar x, \bar u)},
+  \qquad
+  B = \frac{\partial f}{\partial u}\bigg|_{(\bar x, \bar u)},
+\end{equation}
+at a fixed nominal $(\bar x, \bar u)$
+(typically hover for a quadrotor).
+The cached matrices are valid only near $(\bar x, \bar u)$.
+Deviation $\to$ model mismatch $\to$ degraded or
+lost feasibility.
+
+% ============================================================
+\section{Differential Flatness}\label{sec:flatness}
+% ============================================================
+
+\begin{definition}[Differentially flat system]
+\label{def:flat}
+A system $\dot x = f(x, u)$ with state $x\in\R^n$,
+input $u\in\R^m$ is \textbf{differentially flat}
+if there exist \textbf{flat outputs}
+$\sigma = h(x, u, \dot u, \ldots, u^{(r)}) \in \R^m$
+such that:
+\begin{enumerate}[label=(\alph*), leftmargin=8mm]
+  \item $x = \varphi(\sigma, \dot\sigma, \ldots,
+    \sigma^{(s)})$
+    \quad (state recovery),
+  \item $u = \psi(\sigma, \dot\sigma, \ldots,
+    \sigma^{(s+1)})$
+    \quad (input recovery),
+\end{enumerate}
+for smooth maps $\varphi, \psi$ and some finite $s$.
+\end{definition}
+
+\begin{remark}[Quadrotor]
+For a quadrotor with state
+$(p, v, R, \omega) \in \R^3 \times \R^3 \times \SO(3)
+\times \R^3$
+and inputs $(T, \tau) \in \R \times \R^3$
+(thrust + body torques),
+the flat outputs are
+\begin{equation}\label{eq:flat-quad}
+  \sigma = (x, y, z, \psi) \in \R^3 \times S^1
+  \;\approx\; \R^4.
+\end{equation}
+Recovery:
+position $p = \sigma_{1:3}$,
+velocity $v = \dot\sigma_{1:3}$,
+thrust direction
+$e_3^{\mathcal{B}} = (m\ddot\sigma_{1:3} + mg\,e_3)/
+\norm{m\ddot\sigma_{1:3} + mg\,e_3}$
+(determines roll and pitch from $\ddot\sigma$),
+yaw from $\sigma_4 = \psi$.
+The full rotation $R$ and angular velocity $\omega$
+follow from $(\ddot\sigma, \dddot\sigma, \psi, \dot\psi)$.
+Thrust $T = \norm{m\ddot\sigma_{1:3} + mg\,e_3}$.
+\end{remark}
+
+\subsection{Flat equilibrium manifold}
+
+Given a flat output trajectory
+$\sigma(t)$ and its derivatives,
+the flatness maps produce a
+\textbf{dynamically consistent} pair:
+\begin{equation}\label{eq:flat-eq}
+  x^*(\alpha) = \varphi(\alpha),
+  \qquad
+  u^*(\alpha) = \psi(\alpha),
+  \qquad
+  \alpha := (\sigma, \dot\sigma, \ldots, \sigma^{(s+1)}).
+\end{equation}
+This pair satisfies the dynamics exactly:
+$f(x^*(\alpha), u^*(\alpha)) = \dot x^*(\alpha)$.
+
+\begin{definition}[Flat parameter]\label{def:flat-param}
+For a given flat system,
+the \textbf{flat parameter} is the minimal
+sub-tuple of $\alpha$ on which the
+linearisation $(A, B)$ depends.
+Denote it $\alpha \in \R^d$.
+\end{definition}
+
+\begin{remark}[Quadrotor flat parameter]\label{rem:quad-param}
+For a quadrotor, the Jacobians
+$\partial f/\partial x$ and $\partial f/\partial u$
+evaluated at $(x^*, u^*)$ depend only on:
+\begin{equation}\label{eq:quad-alpha}
+  \alpha = (\ddot\sigma_{1:3},\, \psi)
+  = (a_x, a_y, a_z, \psi) \in \R^4,
+\end{equation}
+where $(a_x, a_y, a_z)$ is the commanded acceleration
+(determining the equilibrium attitude)
+and $\psi$ is the yaw angle.
+At hover: $\alpha_0 = (0, 0, 0, 0)$.
+\end{remark}
+
+% ============================================================
+\section{Variant 1: Online Relinearization}\label{sec:online-relin}
+% ============================================================
+
+The most accurate but most expensive variant.
+At each control step:
+\begin{enumerate}[leftmargin=6mm]
+  \item Compute $\alpha$ from the trajectory reference.
+  \item Evaluate $(A(\alpha), B(\alpha))$ via autograd or
+    finite-difference Jacobians.
+  \item Solve a fresh DARE: $O(n^3)$.
+  \item Run $K$ ADMM iterations with the new cache: $K \cdot O(n^2)$.
+\end{enumerate}
+
+\textbf{Online cost:} $O(n^3 + K\,n^2)$ per step.
+
+This is the ``gold standard'' that all other variants
+approximate.
+The per-step DARE solve is the bottleneck
+(${\sim}22$\,s total for 200 figure-eight steps in Python).
+
+% ============================================================
+\section{Variant 2: Flat Template}\label{sec:template}
+% ============================================================
+
+\subsection{Parameterised linearisation}
+
+Linearise $f$ at the flat equilibrium
+$(x^*(\alpha), u^*(\alpha))$:
+\begin{equation}\label{eq:param-lin}
+  A(\alpha) = \frac{\partial f}{\partial x}
+    \bigg|_{(x^*(\alpha),\, u^*(\alpha))},
+  \qquad
+  B(\alpha) = \frac{\partial f}{\partial u}
+    \bigg|_{(x^*(\alpha),\, u^*(\alpha))}.
+\end{equation}
+
+\begin{proposition}[Smoothness]\label{prop:smooth}
+If $f, \varphi, \psi$ are $C^2$, then
+$\alpha \mapsto (A(\alpha), B(\alpha))$
+is $C^1$ on $\R^d$.
+\end{proposition}
+\begin{proof}
+Composition of $C^2$ maps
+($f$, $\varphi$, $\psi$, and the Jacobian operator)
+is $C^1$.
+\end{proof}
+
+\subsection{Riccati cache family}
+
+For each $\alpha$, the steady-state Riccati equation
+with $A(\alpha), B(\alpha)$ and fixed $Q, R, \rho$ gives:
+\begin{equation}\label{eq:riccati-alpha}
+\begin{aligned}
+  P_\infty(\alpha)
+  &= Q + \rho\, I + A(\alpha)^\trans P_\infty(\alpha)\, A(\alpha)
+  \\
+  &\quad - A(\alpha)^\trans P_\infty(\alpha)\, B(\alpha)\,
+    K_\infty(\alpha), \\[4pt]
+  K_\infty(\alpha)
+  &= \bigl(R + \rho\, I + B(\alpha)^\trans
+    P_\infty(\alpha)\, B(\alpha)\bigr)^{-1}
+    B(\alpha)^\trans P_\infty(\alpha)\, A(\alpha), \\[4pt]
+  C_\infty(\alpha)
+  &= \bigl(R + \rho\, I + B(\alpha)^\trans
+    P_\infty(\alpha)\, B(\alpha)\bigr)^{-1}.
+\end{aligned}
+\end{equation}
+
+\begin{proposition}[Smooth cache]\label{prop:smooth-cache}
+If $(A(\alpha), B(\alpha))$ is stabilisable for all
+$\alpha$ in a compact set $\mathcal{A} \subset \R^d$,
+then $\alpha \mapsto (P_\infty(\alpha), K_\infty(\alpha),
+C_\infty(\alpha))$ is $C^1$ on $\mathcal{A}$.
+\end{proposition}
+
+\subsection{The template}
+
+\begin{definition}[Flat template]\label{def:template}
+A \textbf{flat template} for a differentially flat
+system with cost $(Q, R, \rho)$ is a map
+\begin{equation}\label{eq:template}
+  \mathcal{T} : \R^d \to
+  \R^{n\times n} \times \R^{m\times n} \times \R^{m\times m},
+  \qquad
+  \alpha \mapsto
+  \bigl(P_\infty(\alpha),\, K_\infty(\alpha),\,
+  C_\infty(\alpha)\bigr),
+\end{equation}
+defined by the DARE \eqref{eq:riccati-alpha}.
+\end{definition}
+
+\noindent
+\textbf{Offline}: evaluate $\mathcal{T}$
+on a grid $\{\alpha_i\}_{i=1}^G \subset \mathcal{A}$
+and store the cache triples.
+
+\noindent
+\textbf{Online}: given current flat output derivatives,
+compute $\alpha_{\mathrm{now}}$,
+look up (or interpolate) the nearest cache,
+and run TinyMPC's ADMM
+with $(A(\alpha_{\mathrm{now}}),\,
+B(\alpha_{\mathrm{now}}),\,
+K_\infty(\alpha_{\mathrm{now}}),\,
+C_\infty(\alpha_{\mathrm{now}}))$.
+
+\textbf{Online cost:} $K \cdot O(n^2)$ (same as TinyMPC per iteration).
+
+\begin{remark}[Storage]\label{rem:storage}
+For a quadrotor ($n=12, m=4, d=4$):
+each cache triple requires
+$12^2 + 4 \times 12 + 4^2 = 208$ floats
+$= 832$ bytes (float32).
+A $10^4$-point grid in $\R^4$
+costs $\approx 8$ MB---within microcontroller flash.
+\end{remark}
+
+% ============================================================
+\section{Flat Template Algorithm}\label{sec:algorithm}
+% ============================================================
+
+\begin{algorithm}[H]
+\SetAlgoLined
+\caption{Flat Template MPC}\label{alg:flat-mpc}
+\KwIn{Current state $x_0$;\;
+  flat output derivatives
+  $(\sigma, \dot\sigma, \ldots)$ from planner or estimator;\;
+  template $\mathcal{T}$;\;
+  ADMM iterations $K$;\;
+  penalty $\rho > 0$;\;
+  warm-start $(\bar v, \bar\lambda)$.}
+\KwOut{Control $u_0^* \in \R^m$.}
+
+\medskip
+
+\textbf{Step 0: Flat parameter.}\;
+$\alpha \gets (\ddot\sigma_{1:3},\, \psi)$
+\tcp*{quadrotor case}
+
+\textbf{Step 1: Template lookup.}\;
+$(A, B) \gets (A(\alpha),\, B(\alpha))$
+\tcp*{evaluate or interpolate}
+$(P, K, C) \gets \mathcal{T}(\alpha)$
+\tcp*{cached Riccati}
+
+\textbf{Step 2: Reference.}\;
+$x^* \gets \varphi(\alpha)$,\;
+$u^* \gets \psi(\alpha)$
+\tcp*{flat equilibrium}
+
+Shift coordinates:
+$\tilde x_0 \gets x_0 - x^*$,\;
+update linear cost terms
+$q \gets Q\, x^*$, $r \gets R\, u^*$\;
+
+\medskip
+
+\textbf{Step 3: ADMM (identical to TinyMPC).}\;
+\For{$j = 1, \ldots, K$}{
+  \textbf{Primal:}
+  Forward rollout with cached $K, C$:\;
+  $\tilde u_k = -K\,\tilde x_k - C\,(B^\trans p_{k+1}
+  + r + \rho(v_{u,k} - \lambda_{u,k}/\rho))$,\;
+  $\tilde x_{k+1} = A\,\tilde x_k + B\,\tilde u_k$\;
+
+  \textbf{Slack:}
+  $v_{x,k} = \clip(\tilde x_k + x^* + \lambda_{x,k}/\rho,\;
+    x_{\min},\; x_{\max}) - x^*$\;
+  $v_{u,k} = \clip(\tilde u_k + u^* + \lambda_{u,k}/\rho,\;
+    u_{\min},\; u_{\max}) - u^*$\;
+
+  \textbf{Dual:}
+  $\lambda_{x,k} \mathrel{+}= \rho\,(\tilde x_k - v_{x,k})$,\;
+  $\lambda_{u,k} \mathrel{+}= \rho\,(\tilde u_k - v_{u,k})$\;
+}
+
+\Return $u_0^* = \tilde u_0 + u^*$\;
+\end{algorithm}
+
+% ============================================================
+\section{Uniform Tunnel Guarantee}\label{sec:tunnel}
+% ============================================================
+
+We connect the flat template to the tunnel theory
+\cite{zhang2026ttt}.
+
+\subsection{Tunnel in original coordinates}
+
+\begin{definition}[Tunnel radius]\label{def:tunnel}
+For a fixed linearisation $(A, B)$ at nominal
+$(\bar x, \bar u)$, the \textbf{tunnel radius} is
+\begin{equation}\label{eq:tunnel-radius}
+  r(A, B) = \frac{2\,\alpha(A, B)}{L},
+\end{equation}
+where $\alpha(A, B) = 1 - \bar\rho(A - B\,K_\infty)$
+is the spectral gap of the closed-loop operator
+(using $\bar\rho$ for spectral radius to avoid
+overloading with ADMM penalty $\rho$)
+and $L$ is the Lipschitz constant of $\nabla^2 f$.
+\end{definition}
+
+\begin{assumption}[Uniform stabilisability]
+\label{ass:uniform}
+There exists $\bar\alpha > 0$ such that
+for all $\alpha \in \mathcal{A}$:
+\begin{enumerate}[label=(\roman*), leftmargin=8mm]
+  \item $(A(\alpha), B(\alpha))$ is stabilisable,
+  \item $\alpha(A(\alpha), B(\alpha)) \ge \bar\alpha > 0$.
+\end{enumerate}
+\end{assumption}
+
+\begin{theorem}[Uniform tunnel]\label{thm:uniform}
+Under Assumption~\ref{ass:uniform},
+the flat template MPC
+(Algorithm~\ref{alg:flat-mpc})
+has a \textbf{uniform} tunnel radius
+\begin{equation}\label{eq:uniform-tunnel}
+  r_{\min} = \inf_{\alpha \in \mathcal{A}}\,
+  r(\alpha) \ge \frac{2\,\bar\alpha}{L} > 0
+\end{equation}
+at every flat equilibrium in $\mathcal{A}$.
+The ADMM iterates contract at rate
+$\le 1 - \bar\alpha$ uniformly:
+\begin{equation}\label{eq:uniform-contract}
+  \norm{w^{(j+1)} - w^*(\alpha)}
+  \le (1 - \bar\alpha)\,
+  \norm{w^{(j)} - w^*(\alpha)}
+\end{equation}
+for all $\alpha \in \mathcal{A}$
+and all $w^{(0)}$ with
+$\norm{w^{(0)} - w^*(\alpha)} < r_{\min}$,
+where $w = (x, u, v, \lambda)$ is the full
+primal-dual variable.
+\end{theorem}
+
+\begin{corollary}[Full flat-reachable envelope]
+\label{cor:coverage}
+The union of all $\alpha$-tunnels covers
+a neighbourhood of the entire
+flat equilibrium manifold.
+For a quadrotor with $\mathcal{A}$ spanning
+accelerations up to $a_{\max}$ and all yaw angles,
+this includes all attitudes reachable
+by $\norm{a} \le a_{\max}$---far beyond hover.
+\end{corollary}
+
+% ============================================================
+\section{Variant 3: Analytic Template (Zero-Iteration MPC)}
+\label{sec:analytic}
+% ============================================================
+
+The flat template (\S\ref{sec:template})
+eliminates the fixed-nominal limitation
+but still runs $K$ ADMM iterations online.
+We now eliminate the iterations entirely.
+
+\subsection{Key observation}
+
+When box constraints are inactive,
+the ADMM solution after $K\to\infty$ iterations
+reduces to the unconstrained LQR:
+\begin{equation}\label{eq:zero-iter}
+  u_0^* = u^*(\alpha) - K_\infty(\alpha)\,
+  (x_0 - x^*(\alpha)).
+\end{equation}
+This is a \textbf{single matrix--vector product}---no
+iteration, no slack update, no dual update.
+
+\subsection{Quadrotor: explicit $A(\alpha), B(\alpha)$}
+
+For a quadrotor with state
+$x = (p, \phi, \theta, \psi,
+v, \omega)^\trans
+\in \R^{12}$
+and input $u = (u_1, u_2, u_3, u_4)^\trans \in \R^4$
+(individual motor thrusts),
+the flat parameter is
+$\alpha = (a_x, a_y, a_z, \psi)$.
+
+The equilibrium attitude follows from the
+thrust direction:
+\begin{equation}\label{eq:eq-attitude}
+  T^* = m\norm{a + g\,e_3},
+  \qquad
+  \phi^* = \arcsin\!\Bigl(
+    \frac{m(a_x \sin\psi - a_y \cos\psi)}{T^*}
+  \Bigr),
+  \qquad
+  \theta^* = \arctan\!\Bigl(
+    \frac{a_x \cos\psi + a_y \sin\psi}{a_z + g}
+  \Bigr).
+\end{equation}
+
+The linearised dynamics at this equilibrium have
+the block structure:
+\begin{equation}\label{eq:A-explicit}
+  A_c(\alpha) =
+  \begin{pmatrix}
+    0 & 0 & I_3 & 0 \\
+    0 & 0 & 0 & W(\phi^*, \theta^*) \\
+    0 & G(\alpha) & 0 & 0 \\
+    0 & 0 & 0 & 0
+  \end{pmatrix}\!,
+  \quad
+  B_c(\alpha) =
+  \begin{pmatrix}
+    0 \\ 0 \\ b(\alpha) \cdot \mathbf{1}^\trans \\ J^{-1} M_{\text{mix}}
+  \end{pmatrix}\!,
+\end{equation}
+where $G(\alpha) \in \R^{3\times 3}$ encodes
+the gravity coupling,
+$W(\phi^*,\theta^*)$ is the Euler kinematic map,
+$b(\alpha) = k_t \cdot e_3^{\mathcal{B}}(\alpha)/m$,
+and $J^{-1}M_{\text{mix}}$ is the torque allocation.
+Discretization: $A_d = I + A_c \Delta t$,
+$B_d = B_c \Delta t$.
+
+\subsection{Perturbation expansion of $K_\infty$}
+
+Write $\alpha = \alpha_0 + \delta\alpha$
+where $\alpha_0 = (0, 0, 0, 0)$ is hover.
+The DARE perturbation theory gives:
+\begin{equation}\label{eq:dP}
+  P_\infty(\alpha)
+  = P_0 + \delta P + O(\norm{\delta\alpha}^2),
+\end{equation}
+where $\delta P$ solves the discrete Lyapunov equation
+\begin{equation}\label{eq:lyap}
+  \delta P
+  = A_{\mathrm{cl},0}^\trans\, \delta P\,
+    A_{\mathrm{cl},0}
+  + S(\delta A, \delta B, P_0, K_0),
+\end{equation}
+with $A_{\mathrm{cl},0} = A_0 - B_0\, K_0$.
+
+\begin{proposition}[Analytic gain]
+\label{prop:analytic-gain}
+The first-order analytic gain is
+\begin{equation}\label{eq:K-analytic}
+  K(\alpha) = K_0
+  + \sum_{i=1}^{d} \delta\alpha_i\, K_i
+  + O(\norm{\delta\alpha}^2),
+\end{equation}
+where each $K_i \in \R^{m \times n}$
+is a constant matrix given by
+\begin{equation}\label{eq:Ki}
+  K_i = C_0\bigl(
+    \delta B_i^\trans P_0\, A_0
+    + B_0^\trans P_i\, A_0
+    + B_0^\trans P_0\, \delta A_i
+    - \delta B_i^\trans P_0\, B_0\, K_0
+    - B_0^\trans P_i\, B_0\, K_0
+  \bigr),
+\end{equation}
+with $C_0 = (R + B_0^\trans P_0\, B_0)^{-1}$.
+All quantities are constant.
+\end{proposition}
+
+\subsection{The zero-iteration control law}
+
+Combining \eqref{eq:zero-iter}
+and \eqref{eq:K-analytic}:
+
+\begin{equation}\label{eq:brutal}
+\boxed{
+  u = u^*(\alpha)
+  - \Bigl(K_0 + \sum_{i=1}^{d}
+    \delta\alpha_i\, K_i\Bigr)
+  \bigl(x_0 - x^*(\alpha)\bigr).
+}
+\end{equation}
+
+\noindent
+\textbf{Online cost:} $O(d\,mn)$.
+For a quadrotor: $O(4 \cdot 4 \cdot 12) = O(192)$
+multiply-accumulate operations.
+With equilibrium computation: $\approx 260$ total ops.
+
+\begin{remark}[Constraints]\label{rem:constraints}
+When constraints are active, clamp the output:
+$u = \clip(u^*(\alpha) - K(\alpha)(x_0 - x^*(\alpha)),
+\; u_{\min},\; u_{\max})$.
+This is a zeroth-order ADMM approximation.
+\end{remark}
+
+% ============================================================
+\section{Variant 4: Barrier-Augmented Template}
+\label{sec:barrier}
+% ============================================================
+
+The Analytic Template handles constraints only by
+clipping---the gain $K(\alpha)$ is unaware of limits.
+We now show that log-barrier functions can be
+absorbed into the DARE cache, yielding a zero-iteration
+controller that is inherently constraint-aware.
+
+\subsection{Interior-point formulation}
+
+For box constraints $u_{\min} \le u \le u_{\max}$,
+the log-barrier method replaces these with a smooth penalty:
+\begin{equation}\label{eq:barrier}
+  \mathcal{B}_\mu(u) = -\mu \sum_{j=1}^{m}
+    \bigl[\log(u_j - u_{\min,j})
+          + \log(u_{\max,j} - u_j)\bigr],
+\end{equation}
+where $\mu > 0$ is the barrier parameter.
+
+\subsection{Input barrier Hessian}
+
+At the flat equilibrium $u^*(\alpha)$, the barrier
+Hessian is a known diagonal matrix:
+\begin{equation}\label{eq:barrier_hess}
+  H_\mu(\alpha) = \mu \cdot \diag\!\left(
+    \frac{1}{(u^*_j - u_{\min,j})^2}
+    + \frac{1}{(u_{\max,j} - u^*_j)^2}
+  \right).
+\end{equation}
+Large when $u^*(\alpha)$ is near a bound;
+small when far from all bounds.
+
+\subsection{State barrier Hessian}
+
+For state constraints $x_{\min} \le x \le x_{\max}$
+(e.g., position bounds $|p_i| \le L$):
+\begin{equation}\label{eq:barrier_hess_x}
+  H_{x,\mu}(\alpha) = \mu \cdot \diag\!\left(
+    \frac{1}{(x^*_i - x_{\min,i})^2}
+    + \frac{1}{(x_{\max,i} - x^*_i)^2}
+  \right),
+\end{equation}
+applied only to constrained state dimensions
+(unconstrained dimensions contribute zero).
+In error coordinates ($x^*_{\mathrm{pos}} = 0$),
+this depends on the reference-to-boundary distance.
+
+\subsection{Barrier-augmented DARE}
+
+Define barrier-augmented costs:
+\begin{align}
+  R_\mu(\alpha) &= R + H_\mu(\alpha), \label{eq:R_barrier} \\
+  Q_\mu(\alpha) &= Q_{\mathrm{lqr}} + H_{x,\mu}(\alpha), \label{eq:Q_barrier}
+\end{align}
+where $Q_{\mathrm{lqr}}$ is the terminal cost from
+standard discrete LQR.
+
+Solving the augmented DARE:
+\begin{equation}\label{eq:dare_barrier}
+  P_\mu = Q_{\mu,\rho} + A_d^\top P_\mu \bigl(
+    A_d - B_d \, G_\mu^{-1} \,
+    B_d^\top P_\mu A_d \bigr),
+\end{equation}
+where $Q_{\mu,\rho} = Q_\mu + \rho I$ and
+$G_\mu = R_\mu + \rho I + B_d^\top P_\mu B_d$,
+yields the barrier-augmented gain
+$K_\mu(\alpha) = G_\mu^{-1} B_d^\top P_\mu A_d$.
+
+The zero-iteration barrier control law:
+\begin{equation}\label{eq:barrier_control}
+\boxed{
+  u = u^*(\alpha)
+  - \Bigl(K_{\mu,0} + \sum_{i=1}^{d}
+    \delta\alpha_i\, \frac{\partial K_\mu}{\partial \alpha_i}\Bigr)
+  \bigl(x_0 - x^*(\alpha)\bigr).
+}
+\end{equation}
+
+\textbf{Online cost:} $\sim$260 ops (identical to Analytic Template).
+
+\textbf{Storage:} $5 \times 4 \times 12 = 240$ floats (identical).
+
+\subsection{$\alpha$-dependent conservatism}
+
+At hover, the four motors produce equal thrust at midrange
+and $H_\mu$ is moderate.
+At aggressive maneuvers (large $\|a\|$), some motors
+approach saturation and $H_\mu$ grows in those channels,
+automatically increasing conservatism.
+The scheduling variable $\alpha$ simultaneously parameterizes
+the linearization, the equilibrium, \emph{and} the
+constraint tightness.
+
+\subsection{Optional: IPM refinement}
+
+For tighter constraint satisfaction,
+$K_{\mathrm{IPM}}$ Newton steps can be run online:
+\begin{enumerate}[leftmargin=6mm]
+  \item Start from the zero-iteration output $u^{(0)}$.
+  \item Recompute $H_\mu$ at current $u^{(k-1)}$
+    (not at equilibrium).
+  \item Solve one Riccati backward pass with updated
+    $R_\mu \to \delta u$.
+  \item $u^{(k)} = u^{(k-1)} + \eta\, \delta u$
+    (Newton step).
+\end{enumerate}
+Each step costs $O(n^2)$ (same as one ADMM iteration).
+Unlike ADMM (linear convergence), Newton--IPM converges
+\emph{quadratically}: 2--3 iterations typically suffice.
+
+\subsection{Limitation: reference outside feasible region}
+
+The barrier Hessian penalizes error-state excursions
+from the reference. If the reference itself exceeds
+the constraint boundary
+(e.g., a circular trajectory outside a square bound),
+no error-state cost modification can prevent violation.
+Only the ADMM projection (which maps absolute bounds
+to per-step error-state bounds) can handle this case.
+
+\textbf{Key result:}
+In the circle-in-square experiment,
+Barrier = Analytic = 88.4\,mm max violation,
+because $R - L = 88$\,mm is the geometric overshoot
+of the reference.
+
+% ============================================================
+\section{Barrier-Augmented Algorithm}\label{sec:barrier-alg}
+% ============================================================
+
+\begin{algorithm}[H]
+\SetAlgoLined
+\caption{Barrier-Augmented Template MPC}\label{alg:barrier}
+\KwIn{Constraint bounds $u_{\min}, u_{\max}$,
+  $x_{\min}, x_{\max}$ (optional),
+  barrier $\mu$, penalty $\rho$.}
+\KwOut{$K_{\mu,0}$,
+  $\{\partial K_\mu / \partial \alpha_i\}_{i=1}^4$,
+  $\alpha_0$.}
+
+\medskip
+\textbf{Offline:}\\
+$\alpha_0 \gets (0,0,0,0)$ \tcp*{hover}
+$(x^*, u^*) \gets \Phi(\alpha_0)$
+\tcp*{flat equilibrium}
+$H_\mu \gets$ Eq.~\eqref{eq:barrier_hess}
+from $u^*$ and input bounds\\
+$H_{x,\mu} \gets$ Eq.~\eqref{eq:barrier_hess_x}
+from $x^*$ and state bounds\\
+$R_\mu \gets R + H_\mu$;\quad
+$Q_\mu \gets Q_{\mathrm{lqr}} + H_{x,\mu}$\\
+Solve DARE~\eqref{eq:dare_barrier}
+with $R_\mu, Q_\mu \to K_{\mu,0}$\\
+
+\For{$i = 1, \ldots, 4$}{
+  $K_\mu^+ \gets$ solve barrier DARE at
+    $\alpha_0 + \varepsilon\, e_i$\\
+  $K_\mu^- \gets$ solve barrier DARE at
+    $\alpha_0 - \varepsilon\, e_i$\\
+  $\partial K_\mu / \partial \alpha_i
+    \gets (K_\mu^+ - K_\mu^-) / (2\varepsilon)$
+  \tcp*{central diff}
+}
+Store $(K_{\mu,0}, \partial_1 K_\mu, \ldots, \partial_4 K_\mu, \alpha_0)$:
+240 floats.
+
+\medskip
+\textbf{Online (per control step):}\\
+$\alpha \gets$ current flat parameter\\
+$\delta\alpha \gets \alpha - \alpha_0$\\
+$(x^*, u^*) \gets \Phi(\alpha)$\\
+$K_\mu \gets K_{\mu,0}
+  + \sum_i \delta\alpha_i \, \partial_i K_\mu$
+\tcp*{192 MACs}
+$u \gets u^* - K_\mu \, (x - x^*)$
+\tcp*{48 MACs}
+$u \gets \clip(u, u_{\min}, u_{\max})$
+\tcp*{4 comparisons}
+\end{algorithm}
+
+% ============================================================
+\section{Foolproof Implementation}\label{sec:foolproof}
+% ============================================================
+
+Everything above reduces to the following.
+No optimisation theory is needed to implement it.
+
+\subsection{Constants (your quadrotor)}
+
+Fix these once for your hardware:
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}l l l@{}}
+\toprule
+\textbf{Symbol} & \textbf{Meaning} & \textbf{How to get it} \\
+\midrule
+$m$ & mass (kg) & weigh it \\
+$g$ & gravity ($9.81$) & constant \\
+$J_x, J_y, J_z$ & inertia (kg\,m$^2$)
+  & CAD or swing test \\
+$k_t$ & per-motor thrust coeff & motor datasheet \\
+$k_m$ & per-motor torque coeff & motor datasheet \\
+$\ell$ & arm length (m) & measure it \\
+$Q \in \R^{12 \times 12}$ & state cost
+  & diagonal, you choose \\
+$R \in \R^{4 \times 4}$ & input cost
+  & diagonal, you choose \\
+$\Delta t$ & control period (s)
+  & your timer \\
+$u_{\min}, u_{\max}$ & actuator limits
+  & motor datasheet \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Offline (run once, on your laptop)}
+
+\begin{algorithm}[H]
+\SetAlgoLined
+\caption{Offline Precomputation (Analytic or Barrier)}\label{alg:offline}
+\KwIn{$m,\, g,\, J,\, k_t,\, k_m,\, \ell,\,
+  Q,\, R,\, \Delta t$,\;
+  (optional) $\mu, u_{\min}, u_{\max}, x_{\min}, x_{\max}$.}
+\KwOut{$K_0 \in \R^{4 \times 12}$,\;
+  $K_1, K_2, K_3, K_4 \in \R^{4 \times 12}$,\;
+  $\alpha_0 \in \R^4$.}
+
+\medskip
+
+\textbf{1.\ Hover equilibrium.}\\
+$\alpha_0 \gets (0,\; 0,\; 0,\; 0)$
+\tcp*{at hover, $a = (0,0,g)$ but code uses $(0,0,0,0)$}
+$u_0^* \gets (T^*/(4k_t)) \cdot \mathbf{1} \in \R^4$
+where $T^* = mg$\\
+
+\medskip
+\textbf{2.\ Hover linearisation.}\\
+$(A_0, B_0) \gets \texttt{linearise}(\alpha_0)$
+\tcp*{Algorithm~\ref{alg:linearise}}
+
+\medskip
+\textbf{3.\ Solve DARE at hover.}\\
+\If{Barrier variant ($\mu > 0$)}{
+  $H_\mu \gets$ Eq.~\eqref{eq:barrier_hess} from $(u_0^*, u_{\min}, u_{\max})$\\
+  $H_{x,\mu} \gets$ Eq.~\eqref{eq:barrier_hess_x} from $(x_0^*, x_{\min}, x_{\max})$\\
+  $R_\mu \gets R + H_\mu$;\;
+  $Q_\mu \gets \texttt{dlqr}(A_0, B_0, Q, R_\mu) + H_{x,\mu}$\\
+  $P_0 \gets \texttt{dare}(A_0, B_0, Q_\mu + \rho I, R_\mu + \rho I)$\\
+}{
+  $P_{\text{lqr}} \gets \texttt{dlqr}(A_0, B_0, Q, R)$\\
+  $P_0 \gets \texttt{dare}(A_0, B_0, P_{\text{lqr}} + \rho I, R + \rho I)$\\
+}
+$K_0 \gets (R_{\text{aug}} + B_0^\trans P_0\, B_0)^{-1}\,
+  B_0^\trans P_0\, A_0$\\
+
+\medskip
+\textbf{4.\ Central differences (4 directions).}\\
+$\varepsilon \gets 10^{-3}$\\
+\For{$i = 1, \ldots, 4$}{
+  $\alpha^+ \gets \alpha_0 + \varepsilon\, e_i$,\quad
+  $\alpha^- \gets \alpha_0 - \varepsilon\, e_i$\\
+  $(A^{\pm}, B^{\pm}) \gets \texttt{linearise}(\alpha^{\pm})$\\
+  $K^{\pm} \gets$ solve DARE (same procedure as Step 3)
+    at $\alpha^{\pm}$\\
+  $K_i \gets (K^+ - K^-)/(2\varepsilon)$
+  \tcp*{central difference}
+}
+
+\medskip
+\textbf{5.\ Store.}\\
+Save $(K_0, K_1, K_2, K_3, K_4, \alpha_0)$:
+$5 \times 4 \times 12 = 240$ numbers.\\
+\end{algorithm}
+
+\subsection{$\texttt{linearise}(\alpha)$}
+
+\begin{algorithm}[H]
+\SetAlgoLined
+\caption{$\texttt{linearise}(\alpha)$:
+  linearisation at flat parameter $\alpha$}
+\label{alg:linearise}
+\KwIn{$\alpha = (a_x, a_y, a_z, \psi)$,\;
+  quadrotor constants $m, g, k_t, k_m, \ell, J, \Delta t$.}
+\KwOut{$(A_d, B_d) \in \R^{12\times 12}
+  \times \R^{12\times 4}$.}
+
+\medskip
+\tcp{Equilibrium attitude from flat output}
+$T^* \gets m\,\sqrt{a_x^2 + a_y^2 + (a_z+g)^2}$\\
+$\phi^* \gets \arcsin\bigl(
+  m\,(a_x \sin\psi - a_y \cos\psi)\,/\,T^*
+\bigr)$\\
+$\theta^* \gets \arctan\bigl(
+  (a_x \cos\psi + a_y \sin\psi)\,/\,(a_z+g)
+\bigr)$\\
+
+\medskip
+\tcp{Gravity coupling matrix $G \in \R^{3\times 3}$}
+$(s_\phi, c_\phi, s_\theta, c_\theta, s_\psi, c_\psi)
+\gets$ trig of $(\phi^*, \theta^*, \psi)$\\
+$G[0,:] \gets T^*/m \cdot
+  (-c_\psi s_\theta s_\phi + s_\psi c_\phi,\;
+   c_\psi c_\theta c_\phi,\;
+   -s_\psi s_\theta c_\phi + c_\psi s_\phi)$\\
+$G[1,:] \gets T^*/m \cdot
+  (-s_\psi s_\theta s_\phi - c_\psi c_\phi,\;
+   s_\psi c_\theta c_\phi,\;
+   c_\psi s_\theta c_\phi + s_\psi s_\phi)$\\
+$G[2,:] \gets T^*/m \cdot
+  (-c_\theta s_\phi,\;
+   -s_\theta c_\phi,\;
+   0)$\\
+
+\medskip
+\tcp{Assemble $A_c$, $B_c$ (continuous time)}
+$A_c[0{:}3, 6{:}9] \gets I_3$;\;
+$A_c[3{:}6, 9{:}12] \gets W(\phi^*, \theta^*)$;\;
+$A_c[6{:}9, 3{:}6] \gets G$\\
+$B_c[6{:}9, :] \gets k_t/m \cdot e_3^{\mathcal{B}} \cdot \mathbf{1}^\trans$;\;
+$B_c[9{:}12, :] \gets J^{-1} M_{\text{mix}}$\\
+
+\medskip
+\tcp{Discretise (forward Euler)}
+$A_d \gets I_{12} + A_c\,\Delta t$;\;
+$B_d \gets B_c\,\Delta t$\\
+\Return $(A_d, B_d)$
+\end{algorithm}
+
+\subsection{Online (every control cycle)}
+
+\begin{algorithm}[H]
+\SetAlgoLined
+\caption{Online Control Loop (the whole thing)}\label{alg:online}
+\KwIn{Stored constants
+  $K_0, K_1, K_2, K_3, K_4 \in \R^{4\times 12}$,\;
+  $\alpha_0 = (0,0,0,0)$,\;
+  $u_{\min}, u_{\max} \in \R^4$,\;
+  mass $m$, gravity $g$, thrust coeff $k_t$.}
+
+\medskip
+\tcp{Run this at every time step}
+\While{true}{
+
+  \textbf{A.\ Read sensors.}\\
+  $x \gets$ IMU + estimator output
+  $= (p_x, p_y, p_z,\;
+  \phi, \theta, \psi,\;
+  v_x, v_y, v_z,\;
+  \omega_x, \omega_y, \omega_z)^\trans
+  \in \R^{12}$\\
+
+  \medskip
+  \textbf{B.\ Get flat parameter.}\\
+  $(a_x, a_y, a_z, \psi_{\text{ref}}) \gets$
+  trajectory planner output
+  \tcp*{commanded accel + yaw}
+  $\alpha \gets (a_x,\; a_y,\; a_z,\;
+    \psi_{\text{ref}})$\\
+  $\delta\alpha \gets \alpha - \alpha_0$
+  \tcp*{4 subtractions}
+
+  \medskip
+  \textbf{C.\ Flat equilibrium.}\\
+  $T^* \gets m\,\sqrt{a_x^2 + a_y^2 + (a_z+g)^2}$\\
+  $\phi^* \gets \arcsin\bigl(
+    m\,(a_x\sin\psi_{\text{ref}}
+    - a_y\cos\psi_{\text{ref}})/T^*\bigr)$\\
+  $\theta^* \gets \arctan\bigl(
+    (a_x\cos\psi_{\text{ref}}
+    + a_y\sin\psi_{\text{ref}})/(a_z+g)\bigr)$\\
+  $x^* \gets (p^{\text{ref}},\;
+    \phi^*, \theta^*, \psi_{\text{ref}},\;
+    v^{\text{ref}},\;
+    0, 0, 0)^\trans$\\
+  $u^* \gets (T^*/(4k_t)) \cdot \mathbf{1}$\\
+
+  \medskip
+  \textbf{D.\ Form gain (4 scalar--matrix multiplies
+    + 4 adds).}\\
+  $K \gets K_0$
+  \tcp*{copy $4 \times 12 = 48$ numbers}
+  \For{$i = 1,\ldots,4$}{
+    $K \gets K + \delta\alpha_i \cdot K_i$
+    \tcp*{48 MACs each, 192 total}
+  }
+
+  \medskip
+  \textbf{E.\ Compute control
+    (one $4 \times 12$ matvec).}\\
+  $\tilde x \gets x - x^*$
+  \tcp*{12 subtractions}
+  $\tilde u \gets K \cdot \tilde x$
+  \tcp*{48 MACs}
+  $u \gets u^* - \tilde u$
+  \tcp*{4 subtractions}
+
+  \medskip
+  \textbf{F.\ Clamp.}\\
+  \For{$j = 1,\ldots,4$}{
+    $u_j \gets \max(u_{\min,j},\;
+      \min(u_{\max,j},\; u_j))$
+  }
+
+  \medskip
+  \textbf{G.\ Send.}\\
+  Write $u$ to motor controller.\\
+  Wait for next timer tick.\\
+}
+\end{algorithm}
+
+\begin{remark}[Operation count]
+Steps A, B: sensor read + 4 subtractions.
+Step C: 1 sqrt, 1 asin, 1 atan, 4 trig, 6 multiplies
+($\approx 20$ ops on CORDIC, $\approx 50$ on FPU).
+Step D: 192 MACs.
+Step E: 48 MACs + 16 adds.
+Step F: 4 comparisons.
+Total: $\approx 260$ arithmetic operations
+per control cycle.
+At 1\,GFLOP/s (low-end MCU): 0.26\,$\mu$s.
+At 200\,MHz FPGA with 48 parallel MACs:
+$\sim$75\,ns.
+\end{remark}
+
+% ============================================================
+\section{FPGA Architecture}\label{sec:fpga}
+% ============================================================
+
+The zero-iteration law \eqref{eq:brutal}
+maps to hardware with no control flow:
+\textbf{pure datapath}.
+
+\subsection{Pipeline stages}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c l l l@{}}
+\toprule
+\textbf{Stage} & \textbf{Operation}
+  & \textbf{Hardware} & \textbf{Latency} \\
+\midrule
+1 & $\alpha \gets (\ddot\sigma, \psi)$
+  & register read & 1 clk \\
+2 & $\delta\alpha \gets \alpha - \alpha_0$
+  & $d$ adders & 1 clk \\
+3 & $x^*(\alpha), u^*(\alpha)$
+  & CORDIC (trig) & $\sim$10 clk \\
+4 & $\tilde x \gets x_0 - x^*$
+  & $n$ adders & 1 clk \\
+5 & $K(\alpha) = K_0 +
+    \sum_i \delta\alpha_i K_i$
+  & $d\!\cdot\! mn$ MACs & $\sim$\!$mn/P$ clk \\
+6 & $\tilde u = K(\alpha)\,\tilde x$
+  & $mn$ MACs & $\sim$\!$mn/P$ clk \\
+7 & $u = u^* - \tilde u$;\; $\clip$
+  & $m$ add + compare & 1 clk \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+$P$ = number of parallel MAC units.
+With $P = 48$ (one MAC per element of $K$):
+stages 5--6 each take 1 clock cycle.
+Total latency: $\sim$15 clock cycles.
+At 200\,MHz: $\sim$75\,ns.
+
+\subsection{Resource estimate (quadrotor)}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}l r l@{}}
+\toprule
+\textbf{Resource} & \textbf{Count} & \textbf{Note} \\
+\midrule
+Constant matrices & $1 + d = 5$
+  & $K_0, K_1, \ldots, K_4 \in \R^{4\times 12}$ \\
+Stored coefficients & $5 \times 48 = 240$
+  & float16 or fixed-point \\
+Storage & 480 bytes & fits in BRAM \\
+DSP slices & $\le 48$
+  & one per $K$ entry \\
+CORDIC cores & 3
+  & $\sin, \cos, \arctan$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+Fits on a low-end FPGA
+(e.g.\ Xilinx Artix-7, Lattice iCE40).
+No soft-core CPU, no OS, no memory allocator.
+The controller is a circuit.
+
+% ============================================================
+\section{Complete Hierarchy}\label{sec:hierarchy}
+% ============================================================
+
+The five variants form a complexity cascade:
+\begin{equation*}
+\text{Online Relin}
+\xrightarrow{\text{cache}}
+\text{Flat Template}
+\xrightarrow{K\to 0}
+\text{Barrier Templ.}
+\xrightarrow{\mu\to 0}
+\text{Analytic Templ.}
+\xrightarrow{\text{1st order}}
+\text{Gain Sched.}
+\end{equation*}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}l c c c c c@{}}
+\toprule
+\textbf{Variant}
+  & \textbf{Linearisation}
+  & \textbf{Iters}
+  & \textbf{Online cost}
+  & \textbf{Constraints}
+  & \textbf{Valid region} \\
+\midrule
+Online Relin
+  & fresh Jacobian
+  & $K$
+  & $O(n^3 + Kn^2)$
+  & Hard
+  & global \\
+Flat Template
+  & $\alpha$-grid cache
+  & $K$
+  & $K \cdot O(n^2)$
+  & Hard
+  & flat envelope \\
+Barrier Templ.
+  & hover + $\partial K_\mu$
+  & 0
+  & $O(d\,mn)$
+  & Soft
+  & flat envelope \\
+Analytic Templ.
+  & hover + $\partial K$
+  & 0
+  & $O(d\,mn)$
+  & Clip
+  & flat envelope \\
+Gain Schedule
+  & hover (fixed)
+  & 0
+  & $O(d\,mn)$
+  & Clip
+  & near hover \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+All variants with $\alpha$-parameterization share the
+uniform tunnel guarantee (Theorem~\ref{thm:uniform}).
+The key insight: flatness compresses the scheduling space
+from $\R^{12}$ to $\R^4$ via
+$\alpha = (a_x, a_y, a_z, \psi)$,
+so only 4 sensitivity matrices (240 floats) are needed.
+
+% ============================================================
+\section{Experiment Results}\label{sec:results}
+% ============================================================
+
+All simulations use a Crazyflie 2.1 model
+(mass 35\,g, arm 46\,mm) at 50\,Hz.
+Python reference implementation; wall times are
+for relative comparison only.
+
+\subsection{Hover stabilization}
+
+Initial offset $(0.2, 0.2, -0.2)$\,m.
+$N=10$, $\rho=85$, 100 steps.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+ & TinyMPC & Online Relin & Flat Templ. & Analytic \\
+\midrule
+Avg.\ pos.\ err (m) & \textbf{0.064} & 0.095 & 0.138 & 0.145 \\
+Avg.\ ADMM iters     & 80.0 & 16.7 & 7.8 & 0 \\
+Wall time (s)        & 2.85 & 12.13 & \textbf{0.44} & \textbf{0.13} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+At hover, TinyMPC's fixed linearization is exact
+($\alpha_0$ is hover) and achieves the best error.
+But the Analytic Template is $22\times$ faster.
+
+\subsection{Figure-eight tracking}
+
+$xz$-plane, amplitude 0.5\,m, period 3.7\,s.
+$N=15$, $\rho=5$, 200 steps.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+ & TinyMPC & Online Relin & Flat Templ. & Analytic \\
+\midrule
+Avg.\ pos.\ err (m) & \textbf{0.033} & 0.035 & 0.035 & 0.036 \\
+Avg.\ ADMM iters     & 8.0 & 5.1 & 3.6 & 0 \\
+Wall time (s)        & 1.16 & 22.02 & 0.75 & \textbf{0.26} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+All four variants achieve comparable accuracy.
+The Flat Template is $1.5\times$ faster than TinyMPC;
+the Analytic Template is $4.5\times$ faster.
+Online Relin is $29\times$ slower due to
+per-step DARE solves.
+
+\subsection{Circle-in-square (constrained tracking)}
+
+Circular trajectory ($R = 0.3$\,m) in the $xy$-plane,
+inscribed square $|x|, |y| \le L = R/\sqrt{2}$.
+$N=20$, $\rho=50$, 500 steps.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+ & Online Relin & Flat Templ. & Barrier & Analytic \\
+ & (ADMM) & (ADMM) & (zero-iter) & (zero-iter) \\
+\midrule
+Avg.\ pos.\ err (m) & 0.062 & 0.062 & \textbf{0.017} & \textbf{0.017} \\
+Max viol.\ (mm)      & \textbf{0.0} & \textbf{0.0} & 88.4 & 88.4 \\
+Mean viol.\ (mm)     & \textbf{0.0} & \textbf{0.0} & 45.8 & 45.7 \\
+Avg.\ ADMM iters     & 450.8 & 450.8 & 0 & 0 \\
+Wall time (s)        & 168.1 & 157.4 & \textbf{0.65} & \textbf{0.62} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Key observations:}
+\begin{itemize}[leftmargin=6mm]
+  \item ADMM variants achieve 0\,mm violation by encoding
+    absolute constraints as per-step error-state bounds.
+  \item Zero-iteration variants show 88.4\,mm violation
+    $= R - L$ (geometric limit).
+  \item Barrier $=$ Analytic because the barrier Hessian
+    cannot override a reference outside the feasible region.
+  \item $240\times$ wall-time speedup from ADMM to zero-iteration.
+\end{itemize}
+
+% ============================================================
+\section{Python API Reference}\label{sec:api}
+% ============================================================
+
+\subsection{Source modules}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}l l@{}}
+\toprule
+\textbf{Module} & \textbf{Description} \\
+\midrule
+\texttt{src/quadrotor.py} & 13-state quaternion dynamics (autograd) \\
+\texttt{src/tinympc.py} & Core ADMM-based MPC solver \\
+\texttt{src/flat\_linearization.py} & $\alpha$-parameterized analytic Jacobians \\
+\texttt{src/flat\_template.py} & Flat Template: DARE cache grid + ADMM \\
+\texttt{src/analytic\_template.py} & Analytic Template: $K_0 + \sum \delta\alpha_i K_i$ \\
+\texttt{src/barrier\_template.py} & Barrier Template: log-barrier in DARE cache \\
+\texttt{src/rho\_adapter.py} & ADMM penalty $\rho$ adaptation \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Flat linearization API}
+
+\begin{lstlisting}[caption={flat\_linearization.py}]
+from src.flat_linearization import (
+    get_quad_params,    # QuadrotorDynamics -> dict
+    flat_equilibrium,   # alpha -> (x_eq, u_eq)
+    linearise,          # alpha -> (A_d, B_d)
+    quat_to_euler_state,  # 13D quat -> 12D Euler
+    euler_to_quat,      # (phi, theta, psi) -> quat
+)
+
+# Setup
+quad = QuadrotorDynamics(...)
+params = get_quad_params(quad)
+
+# Flat parameter: [a_x, a_y, a_z, psi]
+alpha = np.array([0.0, 0.0, 0.0, 0.0])  # hover
+
+# Equilibrium state (12D) and input (4D motor thrusts)
+x_eq, u_eq = flat_equilibrium(alpha, params)
+
+# Analytic Jacobians (no autograd)
+A_d, B_d = linearise(alpha, params)  # (12x12), (12x4)
+\end{lstlisting}
+
+\subsection{Analytic Template API}
+
+\begin{lstlisting}[caption={analytic\_template.py}]
+from src.analytic_template import AnalyticTemplate
+
+ctrl = AnalyticTemplate(params, Q, R, rho=5.0)
+ctrl.precompute()  # solves 9 DAREs, stores 240 floats
+
+# Online: ~260 ops per call
+alpha = np.array([a_x, a_y, a_z, psi])
+u = ctrl.control(x, alpha, u_min=u_lo, u_max=u_hi)
+\end{lstlisting}
+
+\subsection{Barrier Template API}
+
+\begin{lstlisting}[caption={barrier\_template.py}]
+from src.barrier_template import BarrierTemplate
+
+ctrl = BarrierTemplate(
+    params, Q, R, rho=50.0, mu=1e-3,
+    u_min=u_lo, u_max=u_hi,    # input constraints
+    x_min=x_lo, x_max=x_hi,    # state constraints
+)
+ctrl.precompute()  # barrier-augmented DAREs
+
+# Online: ~260 ops (identical datapath)
+u = ctrl.control(x, alpha, u_min=u_lo, u_max=u_hi)
+\end{lstlisting}
+
+\subsection{Flat Template API}
+
+\begin{lstlisting}[caption={flat\_template.py}]
+from src.flat_template import FlatTemplateMPC
+
+# Grid of alpha values for cache
+grid = [np.array([0, 0, 0, 0]), ...]
+
+ctrl = FlatTemplateMPC(params, Q, R, N=15, rho=5.0,
+                       grid_alphas=grid)
+ctrl.set_bounds(umin=u_lo, umax=u_hi,
+                xmin=x_lo, xmax=x_hi)
+ctrl.set_tols_iters(max_iter=10,
+                    abs_pri_tol=1e-3, abs_dua_tol=1e-3)
+
+# Online: ADMM solve with cached matrices
+x_traj, u_traj, status, iters = ctrl.solve(
+    x0_error, alpha
+)
+\end{lstlisting}
+
+\subsection{TinyMPC API}
+
+\begin{lstlisting}[caption={tinympc.py}]
+from src.tinympc import TinyMPC
+
+ctrl = TinyMPC(A_hover, B_hover, Q, R,
+               Nsteps=15, rho=5.0)
+ctrl.set_bounds(umin=u_lo, umax=u_hi,
+                xmin=x_lo, xmax=x_hi)
+
+# Online: ADMM with fixed (A, B)
+x_traj, u_traj, status, iters = ctrl.solve_admm(
+    x_init, u_init, x_ref=x_ref, u_ref=u_ref
+)
+\end{lstlisting}
+
+% ============================================================
+\section{Discussion}\label{sec:discussion}
+% ============================================================
+
+\subsection{Connection to TTT}
+
+The flat template is the LQ envelope
+of \cite{zhang2026ttt} parameterised by
+the flat coordinate $\alpha$.
+The envelope moves with the operating point;
+flatness provides the global chart
+in which this motion is smooth.
+The tunnel theorem of \cite{zhang2026ttt}
+gives the contraction guarantee at each $\alpha$;
+Theorem~\ref{thm:uniform} is the uniform version
+over all $\alpha$.
+The analytic template
+(Proposition~\ref{prop:analytic-gain})
+is the first-order Taylor expansion of the
+envelope in $\alpha$---the tunnel
+linearised in its own parameter space.
+
+\subsection{Why Barrier Cannot Enforce Absolute Constraints}
+
+The barrier Hessian penalizes deviations from the
+\emph{reference} in error coordinates.
+When the reference itself violates the constraint
+(e.g., a circular trajectory outside a square bound),
+no error-state cost modification can prevent violation.
+The costate $\nabla V$ at the reference does not capture
+the directional constraint information needed near boundaries.
+Only ADMM's iterative projection can map absolute bounds
+to per-step error-state bounds---the ``missing ingredient''
+that zero-iteration controllers lack.
+
+\begin{remark}[The black hole analogy --- 2026-02-18]
+The constraint boundary acts like an event horizon:
+the barrier Hessian $H_{x,\mu}$ grows as
+$1/d^2$ near the boundary (where $d$ is the
+distance to the constraint wall),
+curving the cost landscape exactly like
+the Schwarzschild metric curves spacetime near $r_s$.
+The zero-iteration controller ``sees'' this curvature
+at the reference point, but if the reference
+is already past the horizon ($R > L$), no local
+cost modification can pull the trajectory back---just
+as no local force can escape a black hole.
+The ADMM projection is the ``rocket'' that can
+cross the horizon boundary by operating in
+absolute coordinates.
+We reproduced this black hole in the circle-in-square
+experiment: 88.4\,mm of inescapable violation.
+\end{remark}
+
+\subsection{Gain scheduling, done right}
+
+Classical gain scheduling computes
+$K(\alpha)$ by interpolating
+between hand-tuned operating points.
+The analytic template produces
+the same object but:
+\begin{enumerate}[leftmargin=6mm]
+  \item The schedule variable $\alpha$
+    is \emph{derived} (from flatness),
+    not chosen by intuition.
+  \item The gain perturbation $K_i$
+    is \emph{computed} (from the DARE),
+    not tuned.
+  \item The valid region is
+    \emph{guaranteed} (by the tunnel),
+    not assumed.
+\end{enumerate}
+
+\subsection{Higher-order templates}
+
+The first-order expansion \eqref{eq:K-analytic}
+is accurate near hover.
+For extreme manoeuvres,
+extend to second order:
+$K(\alpha) = K_0 + \sum_i \delta\alpha_i K_i
++ \sum_{i,j} \delta\alpha_i \delta\alpha_j K_{ij}
++ \cdots$
+Each $K_{ij}$ is a constant matrix.
+Online cost scales as $O(d^2 mn)$---still
+$O(1)$ iterations, just more MACs.
+On FPGA, second order adds $\binom{d+1}{2} = 10$
+additional scalar--matrix multiplies for $d = 4$.
+
+\subsection{Beyond quadrotors}
+
+Any differentially flat system admits
+an analytic template:
+\begin{itemize}[leftmargin=6mm]
+  \item \textbf{Fixed-wing aircraft}:
+    $\sigma = (x, y, z, \psi)$, $d = 4$.
+  \item \textbf{Planar bipedal robot}:
+    flat output = CoM + swing foot.
+  \item \textbf{Differentially flat manipulators}:
+    $\sigma$ = joint positions (trivially flat),
+    $d = m$.
+    Degenerates to computed-torque controller.
+\end{itemize}
+
+\subsection{What this does not do}
+
+The analytic template addresses model mismatch
+from operating-point dependence.
+It does \emph{not} address:
+\begin{itemize}[leftmargin=6mm]
+  \item Unmodelled dynamics (wind, flex, latency)
+    --- use a disturbance observer or L1 adaptive.
+  \item Non-flat systems --- no flat coordinate
+    chart exists; use the grid-based template.
+  \item Hard constraint satisfaction under
+    sustained saturation --- fall back to ADMM.
+\end{itemize}
+
+% ============================================================
+% References
+% ============================================================
+\bibliographystyle{plain}
+
+\begin{thebibliography}{9}
+
+\bibitem{tinympc}
+K.~Nguyen, S.~Schoedel, A.~Alavilli, B.~Plancher,
+and Z.~Manchester.
+\newblock {TinyMPC}: Model-predictive control on
+  resource-constrained microcontrollers.
+\newblock \emph{arXiv:2310.16985}, 2023.
+
+\bibitem{zhang2026ttt}
+J.~Zhang.
+\newblock The tunnel theory.
+\newblock 2026.
+
+\bibitem{lancaster1995algebraic}
+P.~Lancaster and L.~Rodman.
+\newblock \emph{Algebraic Riccati Equations}.
+\newblock Oxford University Press, 1995.
+
+\bibitem{boyd2004}
+S.~Boyd and L.~Vandenberghe.
+\newblock \emph{Convex Optimization}.
+\newblock Cambridge University Press, 2004.
+
+\bibitem{jordana2023}
+A.~Jordana, S.~Kleff, A.~Meduri, J.~Carpentier,
+N.~Mansard, and L.~Righetti.
+\newblock Stagewise {N}ewton method for dynamic game
+  control problems.
+\newblock \emph{arXiv:2307.09298}, 2023.
+
+\bibitem{rugh2000}
+W.~Rugh and J.~Shamma.
+\newblock Research on gain scheduling.
+\newblock \emph{Automatica}, 36(10):1401--1425, 2000.
+
+\bibitem{hewer1971}
+G.~Hewer.
+\newblock An iterative technique for the computation
+  of the steady-state gains for the discrete optimal
+  regulator.
+\newblock \emph{IEEE Trans.\ Automat.\ Control},
+  16(4):382--384, 1971.
+
+\bibitem{konstantinov1993}
+M.~Konstantinov, P.~Petkov, and N.~Christov.
+\newblock Perturbation analysis of the discrete
+  Riccati equation.
+\newblock \emph{Kybernetika}, 29(1):18--29, 1993.
+
+\end{thebibliography}
+
+\end{document}

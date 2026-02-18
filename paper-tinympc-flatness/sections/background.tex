@@ -1,0 +1,262 @@
+% ================================================================
+\section{Background}\label{sec:background}
+
+\subsection{Mathematical Preliminaries}\label{sec:prelim}
+
+This section introduces the three mathematical tools that
+the paper builds on: ADMM, the discrete algebraic Riccati
+equation, and the log-barrier interior-point method.
+Readers familiar with these topics may skip to
+Section~\ref{sec:tinympc_background}.
+
+\textbf{ADMM (Alternating Direction Method of Multipliers).}
+Many MPC problems take the form
+\begin{equation}\label{eq:admm_generic}
+  \min_{z} \; f(z) \quad \text{s.t.} \quad z \in \mathcal{C},
+\end{equation}
+where $f$ is a smooth (often quadratic) cost and $\mathcal{C}$
+encodes constraints (e.g., actuator limits, state bounds).
+ADMM~\cite{boyd2011} splits this into two alternating steps
+by introducing an auxiliary variable $\tilde{z}$ and a dual
+variable $\lambda$:
+\begin{enumerate}[label=(\alph*)]
+  \item \emph{Minimize} $f$ without constraints (smooth, often
+    admits a closed-form or Riccati-based solution):
+    $z^{k+1} = \arg\min_z \; f(z) + \tfrac{\rho}{2}\|z - \tilde{z}^k + \lambda^k\|^2$.
+  \item \emph{Project} onto constraints (often a simple clipping
+    operation):
+    $\tilde{z}^{k+1} = \mathrm{proj}_{\mathcal{C}}(z^{k+1} + \lambda^k)$.
+  \item \emph{Update} the dual variable:
+    $\lambda^{k+1} = \lambda^k + z^{k+1} - \tilde{z}^{k+1}$.
+\end{enumerate}
+The penalty $\rho > 0$ controls the coupling strength between
+the smooth and constraint steps.
+ADMM converges at a \emph{linear} rate: the primal residual
+$\|z - \tilde{z}\|$ decreases geometrically with the number
+of iterations~\cite{boyd2011}.
+For MPC, the key property is that step~(a) has the structure
+of an unconstrained LQR problem, solvable by a Riccati
+recursion, while step~(b) is a componentwise clipping
+operation.
+This separation is what enables the DARE-caching strategy
+of TinyMPC.
+
+\textbf{Discrete Algebraic Riccati Equation (DARE).}
+Consider the infinite-horizon LQR problem for the linear
+system $x_{k+1} = A x_k + B u_k$ with stage cost
+$\ell(x,u) = \frac{1}{2}(x^\top Q x + u^\top R u)$,
+where $Q \succeq 0$ and $R \succ 0$.
+The optimal cost-to-go from state $x$ is
+$V^*(x) = \frac{1}{2} x^\top P x$,
+where $P$ satisfies the DARE:
+\begin{equation}\label{eq:dare_background}
+  P = Q + A^\top P A
+  - A^\top P B (R + B^\top P B)^{-1} B^\top P A.
+\end{equation}
+The optimal feedback gain is
+$K = (R + B^\top P B)^{-1} B^\top P A$,
+so that $u^* = -K x$ minimizes the infinite-horizon cost.
+The closed-loop matrix $A_{\mathrm{cl}} = A - BK$ is stable:
+all eigenvalues lie strictly inside the unit circle,
+guaranteeing exponential convergence
+$\|x_k\| \leq c \, \bar\rho(A_{\mathrm{cl}})^k \|x_0\|$
+where $\bar\rho(A_{\mathrm{cl}}) < 1$ is the spectral radius.
+
+The DARE is solved offline by iterating the Riccati recursion
+$P_{k} = Q + A^\top P_{k+1} A - A^\top P_{k+1} B
+(R + B^\top P_{k+1} B)^{-1} B^\top P_{k+1} A$
+backward from a terminal condition $P_N$ until convergence.
+The converged $P$ and $K$ encode the entire infinite-horizon
+optimal controller in two matrices.
+
+\textbf{Log-Barrier Interior-Point Method.}
+To handle inequality constraints
+$g_j(u) \leq 0$, $j = 1, \ldots, p$,
+the log-barrier method~\cite{boyd2004} replaces them with
+a smooth penalty:
+\begin{equation}\label{eq:barrier_background}
+  \min_u \; f(u) - \mu \sum_{j=1}^{p} \log(-g_j(u)),
+\end{equation}
+where $\mu > 0$ is the barrier parameter.
+The logarithmic term is finite only when all constraints
+are strictly satisfied ($g_j < 0$), and tends to $+\infty$
+as any constraint approaches its boundary ($g_j \to 0^-$).
+As $\mu \to 0$, the solution of~\eqref{eq:barrier_background}
+approaches the solution of the original constrained problem.
+
+For box constraints $u_{\min} \leq u \leq u_{\max}$,
+$g_j(u) = u_j - u_{\max,j}$ and
+$g_{j+m}(u) = u_{\min,j} - u_j$,
+giving the barrier
+$-\mu[\log(u_j - u_{\min,j}) + \log(u_{\max,j} - u_j)]$.
+The Hessian (second derivative) of this barrier is a
+diagonal matrix whose entries are large near the constraint
+boundaries and small far from them.
+
+Each subproblem~\eqref{eq:barrier_background} is smooth
+and unconstrained (in the strict interior), so it can be
+solved by Newton's method.
+Newton's method converges \emph{quadratically}:
+the error decreases as $\|e_{k+1}\| \leq C \|e_k\|^2$,
+meaning that 2--3 iterations typically reduce a moderate
+initial error to machine precision~\cite{boyd2004}.
+This is in contrast to ADMM's linear
+convergence, where a fixed fraction of the error is removed
+per iteration.
+
+\subsection{Related Work}\label{sec:related}
+
+\textbf{Gain scheduling.}
+The classical approach to controlling nonlinear systems around
+varying operating points is gain scheduling~\cite{rugh2000}:
+solve the linear control problem (e.g., LQR or $H_\infty$) at
+a grid of operating points offline, then interpolate the resulting
+gains online.
+Rugh and Shamma~\cite{rugh2000} survey the extensive theory,
+including conditions under which interpolated controllers
+inherit stability from the frozen-parameter designs.
+Our Flat Template MPC is a gain-scheduled ADMM-MPC controller
+where the scheduling variable is the flat parameter $\balpha$,
+and our Analytic Template is a first-order gain schedule with
+an explicit interpolation formula~\eqref{eq:K_interp}.
+
+\textbf{LPV control.}
+Linear parameter-varying (LPV) systems generalize gain scheduling
+by treating the varying linearization as a parameter-dependent
+plant $\dot{x} = A(\theta) x + B(\theta) u$ where $\theta(t)$
+is measurable in real time~\cite{shamma1991}.
+Our framework fits this structure with $\theta = \balpha$,
+but we exploit flatness to guarantee that $\balpha$ is a
+\emph{four-dimensional sufficient statistic} for the
+equilibrium---rather than requiring the full $n$-dimensional
+state as scheduling variable.
+
+\textbf{Riccati sensitivity analysis.}
+The dependence of the DARE solution on system parameters has been
+studied since Hewer~\cite{hewer1971}, with explicit perturbation
+bounds developed by Konstantinov et al.~\cite{konstantinov1993}.
+Our gain sensitivities $\partial K / \partial \alpha_i$
+in~\eqref{eq:dK} are a numerical instance of this theory,
+approximated by central differences.
+The key practical insight is that for quadrotor dynamics,
+$K(\balpha)$ varies smoothly and slowly with $\balpha$,
+so a first-order expansion suffices (4\% mean relative error
+over the tested range).
+
+\textbf{Flatness-based tracking control.}
+Differential flatness has been widely used for quadrotor
+trajectory generation~\cite{mellinger2011,mueller2015} and
+feedforward computation~\cite{faessler2018}.
+Mellinger and Kumar~\cite{mellinger2011} use the flat map to
+compute reference states and inputs, then track with a fixed-gain
+controller.
+Our approach extends this by additionally using the flat map
+to parameterize the \emph{feedback gain itself},
+adapting $K$ to the current operating condition through
+the DARE sensitivity.
+
+\textbf{Explicit MPC.}
+An alternative to online optimization is explicit MPC~\cite{bemporad2002},
+which precomputes the optimal control law as a piecewise-affine
+function of the state via multi-parametric programming.
+The Flat Template MPC shares the ``precompute offline, look up online''
+philosophy, but avoids the exponential complexity of explicit MPC
+by storing only DARE caches (not full polyhedral partitions)
+and running a small number of ADMM iterations online.
+
+\subsection{TinyMPC}\label{sec:tinympc_background}
+
+TinyMPC~\cite{tinympc} solves the constrained linear MPC problem,
+formulated as a quadratic program (QP)~\cite{osqp,boyd2011},
+\begin{align}
+  \min_{x_{1:N}, u_{1:N-1}} \;\;
+  & \tfrac{1}{2} x_N^\top Q_f x_N
+    + \sum_{k=1}^{N-1} \bigl(
+      \tfrac{1}{2} x_k^\top Q x_k
+      + \tfrac{1}{2} u_k^\top R u_k \bigr) \notag \\
+  \text{s.t.} \;\;
+  & x_{k+1} = A x_k + B u_k, \notag \\
+  & x_k \in \mathcal{X},\;\; u_k \in \mathcal{U},
+  \label{eq:mpc}
+\end{align}
+via ADMM, where $\rho > 0$ is the ADMM penalty parameter.
+The key insight is that, for a sufficiently long horizon $N$,
+the backward Riccati recursion converges to a steady-state
+solution $(K_\infty, P_\infty)$.
+The matrix $P_\infty$ is the infinite-horizon optimal
+cost-to-go: it compresses the effect of all future stages
+into a single $n \times n$ matrix, so that
+$\frac{1}{2} \delta x^\top P_\infty \, \delta x$ approximates
+the minimum cost from state $\delta x$ to the origin
+over an infinite horizon.
+TinyMPC solves the discrete algebraic Riccati equation (DARE)
+for $P_\infty$ \emph{offline} and caches the derived quantities:
+\begin{align}
+  K_\infty &= (R_\rho + B^\top P_\infty B)^{-1} B^\top P_\infty A, \label{eq:kinf} \\
+  C_1      &= (R_\rho + B^\top P_\infty B)^{-1}, \notag \\
+  C_2      &= (A - B K_\infty)^\top, \notag
+\end{align}
+where $R_\rho = R + \rho I$ is the ADMM-augmented input cost
+and $Q_\rho = Q + \rho I$ is the ADMM-augmented state cost.
+The gain $K_\infty$ is the optimal LQR gain for the augmented
+problem; $C_1$ and $C_2$ are auxiliary matrices that eliminate
+all matrix inversions from the online computation.
+Each ADMM iteration then requires only matrix--vector products:
+\begin{enumerate}[label=(\roman*)]
+  \item \emph{Backward pass}: compute feedforward corrections
+    $d_k = C_1(B^\top p_{k+1} + r_k)$,
+    $p_k = q_k + C_2 \, p_{k+1} - K_\infty^\top r_k$.
+  \item \emph{Forward pass}: $u_k = -K_\infty x_k - d_k$,
+    $x_{k+1} = A x_k + B u_k$.
+  \item \emph{Slack update}: project onto constraints.
+  \item \emph{Dual update}: gradient ascent on multipliers.
+\end{enumerate}
+
+The entire online computation is \emph{matrix-inversion free}.
+However, the matrices $A, B$ (and hence all cached quantities)
+are fixed at a single linearization point.
+
+\subsection{Differential Flatness of Quadrotor Dynamics}\label{sec:flatness}
+
+A quadrotor with state
+$(p, \dot{p}, R, \omega) \in \R^3 \times \R^3 \times \mathrm{SO}(3) \times \R^3$
+and collective thrust $T$ along the body $z$-axis satisfies
+\begin{equation}\label{eq:trans}
+  m \ddot{p} = T R e_3 - m g e_3.
+\end{equation}
+The system is differentially flat with flat output
+$\by = (p_x, p_y, p_z, \psi)$~\cite{mellinger2011,murray1995}.
+This means that every state and input can be expressed as an
+algebraic function of $\by$ and a finite number of its time derivatives.
+
+The flat map proceeds as follows.
+Define the \emph{total acceleration vector}
+\begin{equation}\label{eq:tvec}
+  \bt = \ddot{p} + g e_3 = \begin{pmatrix} a_x \\ a_y \\ a_z + g \end{pmatrix},
+\end{equation}
+where $(a_x, a_y, a_z)$ is the commanded translational acceleration
+in the world frame.
+Then:
+\begin{enumerate}
+  \item \textbf{Thrust:} $T = m \| \bt \|$.
+  \item \textbf{Attitude:} The body $z$-axis is
+    $z_B = \bt / \|\bt\|$.
+    Given yaw $\psi$, the rotation $R$ is fully determined.
+    In Euler angles (ZYX convention):
+    \begin{align}
+      \phi^* &= \arcsin\!\bigl(
+        (a_x \sin\psi - a_y \cos\psi) / \|\bt\| \bigr), \label{eq:phi_eq} \\
+      \theta^* &= \arctan2\!\bigl(
+        a_x \cos\psi + a_y \sin\psi, \; a_z + g \bigr). \label{eq:theta_eq}
+    \end{align}
+  \item \textbf{Angular velocity and torques:}
+    determined by $p^{(3)}$ and $p^{(4)}$ (jerk and snap) through the
+    kinematic and Euler equations; at equilibrium, $\omega^* = 0$.
+\end{enumerate}
+
+We define the \emph{flat parameter}
+$\balpha = (a_x, a_y, a_z, \psi) \in \R^4$,
+which fully specifies the equilibrium state and input:
+\begin{equation}\label{eq:eq_map}
+  \Phi: \balpha \;\mapsto\; (x^*(\balpha),\; u^*(\balpha)).
+\end{equation}

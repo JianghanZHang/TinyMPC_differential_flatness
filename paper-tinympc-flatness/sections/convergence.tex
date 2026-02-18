@@ -1,0 +1,99 @@
+% ================================================================
+\section{Convergence Analysis}\label{sec:convergence}
+
+We now formalize the two key convergence properties that
+differential flatness enables: (i)~a quadratic gain
+approximation error and (ii)~exponential time-contraction
+of the closed-loop system.
+
+\begin{proposition}[Quadratic gain approximation]\label{prop:gain_approx}
+Let $K(\balpha)$ denote the DARE gain~\eqref{eq:kinf} at
+flat parameter $\balpha$, and let
+$\tilde{K}(\balpha) = K_0 + \sum_{i=1}^{4}
+(\alpha_i - \alpha_{0,i}) \, \partial_i K$
+be the first-order approximation~\eqref{eq:K_interp}.
+Suppose $K(\cdot)$ is twice continuously differentiable
+in a neighborhood of $\balpha_0$
+(guaranteed when $(A_d(\balpha), B_d(\balpha))$ is
+stabilizable and $(Q^{1/2}, A_d(\balpha))$ is
+detectable~\cite{konstantinov1993}).
+Then
+\begin{equation}\label{eq:gain_quad}
+  \|K(\balpha) - \tilde{K}(\balpha)\|_F
+  \;\leq\; \tfrac{1}{2} \, L_K \, \|\balpha - \balpha_0\|^2,
+\end{equation}
+where $L_K = \max_i \sup_{\balpha} \|\partial^2 K / \partial \alpha_i \partial \alpha_j\|_F$
+is the Lipschitz constant of the gain Jacobian.
+\end{proposition}
+
+\begin{proof}
+This is the standard second-order Taylor remainder applied
+to the matrix-valued map $\balpha \mapsto K(\balpha) \in \R^{m \times n}$.
+The twice-differentiability of $K$ with respect to
+the system parameters $(A, B)$ follows from the implicit
+function theorem applied to the DARE~\cite{hewer1971,konstantinov1993},
+composed with the smooth (trigonometric) dependence of
+$(A_d(\balpha), B_d(\balpha))$ on $\balpha$
+from~\eqref{eq:Ac}--\eqref{eq:disc}.
+\end{proof}
+
+\textit{Why flatness matters.}
+Without differential flatness, the scheduling variable
+would be the full $n$-dimensional state, and the gain
+Hessian $\partial^2 K / \partial x_i \partial x_j$ would
+be an $O(n^2)$-parameter tensor.
+Flatness compresses the scheduling space from $\R^n$ to
+$\R^4$, so the Hessian has only $\binom{4+1}{2} = 10$
+independent components---making~\eqref{eq:gain_quad}
+a tight, low-dimensional bound.
+
+\begin{proposition}[Exponential time-contraction]\label{prop:contraction}
+Let $A_{\mathrm{cl}}(\balpha) = A_d(\balpha) - B_d(\balpha) K(\balpha)$
+be the closed-loop matrix at flat parameter $\balpha$.
+The DARE solution guarantees
+$\bar\rho(A_{\mathrm{cl}}) < 1$
+(all eigenvalues strictly inside the unit circle),
+so the error state contracts exponentially:
+\begin{equation}\label{eq:contraction}
+  \|\delta x_k\| \;\leq\; c \; \bar\rho(A_{\mathrm{cl}})^k \; \|\delta x_0\|,
+  \qquad c \geq 1,
+\end{equation}
+where $\delta x_k = x_k - x^*(\balpha)$,
+$\bar\rho(A_{\mathrm{cl}}) < 1$ is the spectral radius,
+and $c$ depends on the condition number of the eigenvector
+matrix of $A_{\mathrm{cl}}$.
+\end{proposition}
+
+\textit{Contraction rate vs.\ constraint conservatism.}
+For the barrier-augmented variant (Section~\ref{sec:barrier}),
+$R_\mu = R + H_\mu(\balpha)$ increases the effective input
+cost, producing a less aggressive gain $K_\mu$ and a larger
+spectral radius $\bar\rho(A_{\mathrm{cl}}^\mu) > \bar\rho(A_{\mathrm{cl}})$.
+Thus the barrier parameter $\mu$ explicitly trades contraction
+speed for constraint margin: larger $\mu$ yields slower
+convergence but greater safety distance from actuator limits.
+
+\begin{corollary}[Tracking error bound]\label{cor:tracking}
+When the first-order gain approximation $\tilde{K}(\balpha)$
+is used instead of the exact gain $K(\balpha)$,
+the closed-loop matrix becomes
+$\tilde{A}_{\mathrm{cl}} = A_d - B_d \tilde{K}$.
+By~\eqref{eq:gain_quad}, the perturbation
+$\Delta K = K - \tilde{K}$ satisfies
+$\|\Delta K\| \leq \frac{1}{2} L_K \|\delta\balpha\|^2$.
+Standard perturbation theory for discrete-time
+systems~\cite{konstantinov1993} then gives
+\begin{equation}\label{eq:tracking_bound}
+  \bar\rho(\tilde{A}_{\mathrm{cl}})
+  \;\leq\; \bar\rho(A_{\mathrm{cl}})
+  + \|B_d\| \cdot \tfrac{1}{2} L_K \|\delta\balpha\|^2
+  + O(\|\delta\balpha\|^4).
+\end{equation}
+The approximate closed loop remains stable whenever
+$\|\delta\balpha\|$ is small enough that the right-hand
+side is less than~$1$.
+For the quadrotor with $\|\delta\balpha\| \leq 3$\,m/s$^2$,
+our numerical tests (Section~\ref{sec:experiments})
+confirm mean gain error of $4\%$ and stable tracking
+across 100 random $\balpha$ samples.
+\end{corollary}

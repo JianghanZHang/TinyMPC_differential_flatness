@@ -1,0 +1,92 @@
+% ================================================================
+\section{Discussion}\label{sec:discussion}
+
+\textbf{When does the fixed linearization suffice?}
+For near-hover operation, TinyMPC's fixed linearization is optimal
+by construction.
+The flat-parameterized variants become advantageous when the trajectory
+induces significant attitude variation---the equilibrium shift
+ensures the ADMM solver operates near zero error at every timestep,
+improving convergence.
+
+\textbf{Computational hierarchy.}
+The five variants form a hierarchy of decreasing online cost
+(see also the equivalence chain~\eqref{eq:full_chain}):
+\begin{center}
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Variant & Online ops & Constr. & Conv. & Sched. \\
+\midrule
+Online Relin & $O(n^3) {+} K O(n^2)$ & Hard & Lin. & $\R^n$ \\
+Flat Template & $K \cdot O(n^2)$ & Hard & Lin. & $\R^4$ \\
+Barrier + IPM & $K_{\text{I}} \cdot O(n^2)$ & Hard & Quad. & $\R^4$ \\
+Barrier & $O(n \cdot m)$ & Soft & --- & $\R^4$ \\
+Analytic & $O(n \cdot m)$ & Clip & --- & $\R^4$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+The central contribution is the path from cubic-time online
+optimization to linear-time deterministic feedback, enabled
+by flatness-compressed scheduling over $\R^4$.
+The Flat Template has the same per-iteration cost as TinyMPC but
+converges in fewer iterations due to better-conditioned linearization.
+The Barrier Template (Section~\ref{sec:barrier}) provides soft
+constraint satisfaction at the same ${\sim}260$-operation cost as
+the Analytic Template, by absorbing log-barrier information
+(both $H_\mu$ for inputs and $H_{x,\mu}$ for states)
+into the DARE cache.
+With optional IPM refinement (2--3 Newton steps),
+it achieves hard constraint satisfaction with quadratic convergence---fewer
+iterations than ADMM for the same accuracy.
+The Analytic Template ($\mu = 0$) trades all constraint handling
+for extreme efficiency.
+The zero-iteration variants (Barrier and Analytic) achieve
+real-linear-time control: deterministic, iteration-free,
+$O(n{\cdot}m) \approx 260$ operations per control output,
+only possible because flatness compresses the scheduling
+space to $\R^4$ (4 sensitivity matrices, 240 floats).
+
+\textbf{What is new vs.\ what is classical.}
+The individual mathematical ingredients---differential
+flatness~\cite{fliess1995,mellinger2011},
+gain scheduling~\cite{rugh2000},
+and Riccati sensitivity~\cite{hewer1971,konstantinov1993}---are
+well established.
+Our contribution is their specific combination in the context
+of embedded ADMM-based MPC:
+(i)~using flatness to compress the scheduling dimension from
+$n$ to~4,
+(ii)~caching the \emph{augmented} DARE (with ADMM penalty $\rho$)
+rather than the standard LQR DARE,
+(iii)~showing the equivalence between the zero-iteration ADMM
+forward pass and the flat gain schedule,
+and (iv)~absorbing log-barrier constraint penalties into the DARE
+cache so that the zero-iteration controller is inherently
+constraint-aware (Section~\ref{sec:barrier}).
+This combination yields the 240-float, 260-operation
+datapath of the Analytic Template---a level of compactness
+not achievable by generic gain scheduling or LPV approaches
+without the flatness reduction---while the barrier augmentation
+adds constraint awareness at no additional online cost.
+
+\textbf{FPGA portability.}
+The analytic linearization (Section~\ref{sec:linearize}) and the
+Analytic Template (Section~\ref{sec:analytic}) are composed entirely
+of elementary operations: trigonometric functions, multiplications,
+and additions.
+There are no loops with data-dependent iteration counts
+and no matrix inversions.
+The 240-float storage and ${\sim}260$-operation datapath
+are directly realizable as a fixed-function pipeline.
+
+\textbf{Limitations.}
+The first-order gain approximation~\eqref{eq:K_interp} degrades
+for large $\|\balpha - \balpha_0\|$.
+For highly aggressive maneuvers, the Flat Template MPC with a
+sufficiently dense cache grid is preferred.
+All wall-clock times are from a Python/NumPy reference
+implementation and reflect relative computational cost
+rather than embedded performance;
+C/C++ implementation with Crazyflie hardware experiments
+is ongoing work.

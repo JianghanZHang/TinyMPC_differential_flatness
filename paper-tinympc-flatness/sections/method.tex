@@ -1,0 +1,352 @@
+% ================================================================
+\section{Method}\label{sec:method}
+
+\subsection{Analytic Linearization}\label{sec:linearize}
+
+Given $\balpha$, we construct the continuous-time Jacobians
+$A_c(\balpha), B_c(\balpha)$ of the 12-dimensional
+Euler-angle state
+$x = (p, \phi, \theta, \psi, v, \omega)$
+about the flat equilibrium~\eqref{eq:eq_map}.
+
+The $12 \times 12$ matrix $A_c$ has the block structure
+\begin{equation}\label{eq:Ac}
+  A_c = \begin{pmatrix}
+    0_{3\times3} & 0_{3\times3} & I_3 & 0_{3\times3} \\
+    0_{3\times3} & 0_{3\times3} & 0_{3\times3} & W(\phi^*,\theta^*) \\
+    0_{3\times3} & G(\balpha)   & 0_{3\times3} & 0_{3\times3} \\
+    0_{3\times3} & 0_{3\times3} & 0_{3\times3} & 0_{3\times3}
+  \end{pmatrix},
+\end{equation}
+where $G(\balpha) \in \R^{3\times3}$ is the gravity coupling matrix
+(derivative of the thrust vector with respect to attitude at equilibrium)
+and $W(\phi^*, \theta^*)$ is the Euler-angle kinematic map
+relating body angular velocity to Euler rates.
+
+The $12 \times 4$ input matrix $B_c$ maps the four motor
+thrusts to state derivatives.
+It has nonzero blocks in
+the velocity rows (thrust direction $\times k_t / m$,
+where $k_t$ is the per-motor thrust coefficient and
+$m$ is the quadrotor mass)
+and the angular velocity rows
+($J^{-1} M_{\mathrm{mix}}$,
+where $J \in \R^{3\times3}$ is the body-frame inertia
+tensor and $M_{\mathrm{mix}} \in \R^{3\times4}$ is
+the motor mixing matrix that maps individual motor
+thrusts to body torques via the arm geometry).
+
+Discretization via forward Euler yields
+\begin{equation}\label{eq:disc}
+  A_d = I_{12} + A_c \Delta t, \qquad
+  B_d = B_c \Delta t.
+\end{equation}
+
+The entire computation is closed-form trigonometry and linear algebra,
+requiring no automatic differentiation.
+
+\subsection{Flat Template MPC}\label{sec:flat_template}
+
+Flat Template MPC extends TinyMPC by maintaining a \emph{family}
+of DARE caches indexed by $\balpha$.
+
+\textbf{Offline.}
+Select a grid $\{\balpha^{(j)}\}_{j=1}^M$
+(e.g., sampled along the reference trajectory).
+For each grid point:
+\begin{enumerate}
+  \item Compute $(A_d^{(j)}, B_d^{(j)}) = \texttt{linearise}(\balpha^{(j)})$.
+  \item Solve the standard (non-augmented) discrete LQR
+    to obtain the terminal cost matrix $P_{\mathrm{lqr}}^{(j)}$.
+  \item Solve augmented DARE~\eqref{eq:kinf} to obtain
+    $K_\infty^{(j)}, P_\infty^{(j)}, C_1^{(j)}, C_2^{(j)}$.
+  \item Store the full cache
+    $\{A_d, B_d, K_\infty, P_\infty, C_1, C_2\}^{(j)}$.
+\end{enumerate}
+
+\textbf{Online.}
+At each control step with current flat parameter $\balpha$:
+\begin{enumerate}
+  \item Look up the nearest cache entry
+    $j^* = \arg\min_j \|\balpha - \balpha^{(j)}\|$.
+  \item Compute the flat equilibrium
+    $(x^*, u^*) = \Phi(\balpha)$.
+  \item Form the error state $\delta x = x - x^*$.
+  \item Run $K_{\mathrm{ADMM}}$ ADMM iterations using cache $j^*$
+    (identical to TinyMPC's backward/forward/slack/dual passes).
+  \item Apply $u = u^* + \delta u_0$, where $\delta u_0$ is
+    the first-step control from the ADMM solution.
+\end{enumerate}
+
+This preserves TinyMPC's matrix-inversion-free online structure
+while adapting the linearization to the current operating point.
+The offline cost is $M$ DARE solves (each ${\sim}5000$ Riccati
+iterations), and the online lookup is $O(M)$ nearest-neighbor search.
+
+\subsection{Analytic Template}\label{sec:analytic}
+
+The Analytic Template eliminates ADMM iterations entirely,
+producing a control output in ${\sim}260$ arithmetic operations.
+
+\textbf{Offline.}
+\begin{enumerate}
+  \item Set $\balpha_0 = (0, 0, 0, 0)$ (hover).
+  \item Solve the augmented DARE at $\balpha_0$ to obtain
+    the base gain $K_0 \in \R^{4 \times 12}$.
+  \item For $i = 1, \ldots, 4$, compute gain sensitivities
+    via central differences:
+    \begin{equation}\label{eq:dK}
+      \frac{\partial K}{\partial \alpha_i} \approx
+      \frac{K(\balpha_0 + \epsilon \, e_i) - K(\balpha_0 - \epsilon \, e_i)}
+           {2\epsilon}.
+    \end{equation}
+  \item Store $K_0$ and $\{\partial_i K\}_{i=1}^4$:
+    a total of $5 \times 4 \times 12 = 240$ floating-point numbers.
+\end{enumerate}
+
+\textbf{Online.}
+Given state $x$ and flat parameter $\balpha$:
+\begin{enumerate}
+  \item $\delta \balpha = \balpha - \balpha_0$.
+  \item Compute $(x^*, u^*) = \Phi(\balpha)$.
+  \item Interpolate the gain (192 multiply-accumulate operations):
+    \begin{equation}\label{eq:K_interp}
+      K(\balpha) \approx K_0 + \sum_{i=1}^{4} \delta\alpha_i \; \frac{\partial K}{\partial \alpha_i}.
+    \end{equation}
+  \item Compute the control (48 MACs):
+    \begin{equation}\label{eq:u_analytic}
+      u = u^*(\balpha) - K(\balpha) \, (x - x^*(\balpha)).
+    \end{equation}
+  \item (Optional) Clip to actuator bounds.
+\end{enumerate}
+
+\textbf{Relationship to TinyMPC.}
+The Analytic Template output is \emph{exactly equal} to
+the first forward-pass step of TinyMPC's ADMM iteration
+with zero warm-start (i.e., before any constraint information
+is incorporated).
+Specifically, when all ADMM dual and slack variables are initialized
+to zero, the first-iteration forward pass produces
+$u_0 = -K_\infty \, \delta x$,
+which matches~\eqref{eq:u_analytic} since $K(\balpha) \approx K_\infty(\balpha)$
+from the same augmented DARE.
+Subsequent ADMM iterations incorporate constraint information
+through the slack and dual updates.
+Thus, the Analytic Template trades constraint handling for
+extreme computational efficiency.
+
+\textbf{Connection to gain scheduling and Riccati sensitivity.}
+The control law~\eqref{eq:u_analytic} with the gain
+interpolation~\eqref{eq:K_interp} is precisely a
+\emph{first-order gain schedule} over the flat parameter
+$\balpha$~\cite{rugh2000}.
+The gain sensitivities $\partial K / \partial \alpha_i$ are instances
+of the classical Riccati perturbation theory~\cite{hewer1971,konstantinov1993},
+evaluated numerically via~\eqref{eq:dK}.
+What makes this gain schedule unusually compact is
+differential flatness: whereas a generic gain schedule over the
+$n$-dimensional state would require $O(n)$ sensitivity matrices,
+flatness reduces the scheduling space to $\R^4$, yielding
+exactly four sensitivity matrices regardless of state dimension.
+This produces the identity:
+\begin{equation}\label{eq:chain}
+  \underbrace{u^* - K(\balpha)\,\delta x}_{\text{Analytic Template}}
+  \;=\;
+  \underbrace{u^* - K_\infty(\balpha)\,\delta x}_{\text{ADMM iter.\,0}}
+  \;+\; O(\epsilon^2),
+\end{equation}
+where the $O(\epsilon^2)$ term is the gain approximation
+error from the first-order Taylor expansion.
+
+\subsection{Barrier-Augmented Template}\label{sec:barrier}
+
+The Analytic Template handles constraints only by
+clipping---the gain $K(\balpha)$ is unaware of actuator limits.
+We now show that log-barrier functions can be absorbed into
+the DARE cache, yielding a zero-iteration controller that is
+inherently constraint-aware.
+
+\textbf{Interior-point formulation.}
+Consider box constraints $u_{\min} \leq u \leq u_{\max}$.
+The log-barrier method~\cite{boyd2004,jordana2023}
+replaces these with a smooth penalty:
+\begin{equation}\label{eq:barrier}
+  \mathcal{B}_\mu(u) = -\mu \sum_{j=1}^{m}
+    \bigl[\log(u_j - u_{\min,j})
+          + \log(u_{\max,j} - u_j)\bigr],
+\end{equation}
+where $\mu > 0$ is the barrier parameter controlling the
+penalty sharpness.
+
+\textbf{Barrier Hessian at equilibrium.}
+The key observation is that the barrier's second derivative
+(Hessian) at a given operating point is a \emph{known diagonal
+matrix} that depends only on the distance from each input
+channel to its bounds.
+At the flat equilibrium $u^*(\balpha)$, this Hessian is:
+\begin{equation}\label{eq:barrier_hess}
+  H_\mu(\balpha) = \mu \cdot \mathrm{diag}\!\left(
+    \frac{1}{(u^*_j - u_{\min,j})^2}
+    + \frac{1}{(u_{\max,j} - u^*_j)^2}
+  \right).
+\end{equation}
+This matrix is large when $u^*(\balpha)$ is near a
+constraint boundary and small when it is far from all
+boundaries---exactly the structure needed to make the
+controller more conservative near limits.
+
+\textbf{State barrier Hessian.}
+For state constraints $x_{\min} \leq x \leq x_{\max}$
+(e.g., position bounds $|p_i| \leq L$),
+the same log-barrier construction yields a state barrier Hessian
+at the equilibrium $x^*(\balpha)$:
+\begin{equation}\label{eq:barrier_hess_x}
+  H_{x,\mu}(\balpha) = \mu \cdot \mathrm{diag}\!\left(
+    \frac{1}{(x^*_i - x_{\min,i})^2}
+    + \frac{1}{(x_{\max,i} - x^*_i)^2}
+  \right),
+\end{equation}
+applied only to the constrained state dimensions
+(unconstrained dimensions contribute zero).
+In error coordinates where $x^*_{\mathrm{pos}} = 0$,
+the equilibrium position equals the reference, so the
+barrier depends on the distance from the reference to
+the constraint boundary:
+$[H_{x,\mu}]_{i,i} = \mu \bigl(
+  1/(p^*_{\mathrm{ref},i} + L)^2 + 1/(L - p^*_{\mathrm{ref},i})^2
+\bigr)$.
+This is $\balpha$-dependent through the reference trajectory,
+making the barrier naturally time-varying.
+
+\textbf{Barrier-augmented DARE.}
+Define the barrier-augmented costs:
+\begin{align}
+  R_\mu(\balpha) &= R + H_\mu(\balpha), \label{eq:R_barrier} \\
+  Q_\mu(\balpha) &= Q_{\mathrm{lqr}} + H_{x,\mu}(\balpha), \label{eq:Q_barrier}
+\end{align}
+where $Q_{\mathrm{lqr}}$ is the terminal cost from the
+standard (non-augmented) discrete LQR.
+Solving the augmented DARE with both $R_\mu$ and $Q_\mu$:
+\begin{equation}\label{eq:dare_barrier}
+  P_\mu = Q_{\mu,\rho} + A_d^\top P_\mu \bigl(
+    A_d - B_d \, G_\mu^{-1} \,
+    B_d^\top P_\mu A_d \bigr),
+\end{equation}
+where $Q_{\mu,\rho} = Q_\mu + \rho I$ and
+$G_\mu = R_\mu + \rho I + B_d^\top P_\mu B_d$,
+yields the barrier-augmented gain
+$K_\mu(\balpha) = G_\mu^{-1} B_d^\top P_\mu A_d$.
+This gain inherently reduces authority on input channels
+that are near their limits and increases the effective
+state cost near constraint boundaries:
+when the reference position approaches the square bound,
+$[H_{x,\mu}]_{i,i}$ grows, penalizing state excursions
+in that direction and making the controller more conservative
+precisely where constraints are tightest.
+
+The offline and online procedures are given
+in Algorithm~\ref{alg:barrier}.
+
+\begin{algorithm}[t]
+\caption{Barrier-Augmented Template MPC}
+\label{alg:barrier}
+\begin{algorithmic}[1]
+\REQUIRE Constraint bounds $u_{\min}, u_{\max}$,
+  $x_{\min}, x_{\max}$ (optional),
+  barrier parameter $\mu$
+\STATE \textit{--- Offline ---}
+\STATE Set $\balpha_0 = (0,0,0,0)$ (hover)
+\STATE $(x^*, u^*) \gets \Phi(\balpha_0)$
+  \hfill\textit{flat equilibrium}
+\STATE $H_\mu \gets$ \eqref{eq:barrier_hess}
+  from $u^*$ and input bounds
+\STATE $H_{x,\mu} \gets$ \eqref{eq:barrier_hess_x}
+  from $x^*$ and state bounds
+\STATE $R_\mu \gets R + H_\mu$;
+  $Q_\mu \gets Q_{\mathrm{lqr}} + H_{x,\mu}$
+  \hfill\textit{barrier-augmented costs}
+\STATE Solve DARE~\eqref{eq:dare_barrier}
+  with $R_\mu, Q_\mu \to K_{\mu,0}$
+\FOR{$i = 1, \ldots, 4$}
+  \STATE $K_\mu^+ \gets$ solve DARE at
+    $\balpha_0 + \epsilon \, e_i$;
+    $K_\mu^- \gets$ at $\balpha_0 - \epsilon \, e_i$
+  \STATE $\frac{\partial K_\mu}{\partial \alpha_i}
+    \gets (K_\mu^+ - K_\mu^-) / (2\epsilon)$
+    \hfill\textit{central differences}
+\ENDFOR
+\STATE \textit{--- Online (per control step) ---}
+\STATE $\balpha \gets$ current flat parameter
+\STATE $K_\mu(\balpha) \approx K_{\mu,0}
+  + \sum_i \delta\alpha_i \,
+  \partial_i K_\mu$
+  \hfill\textit{interpolate}
+\STATE $(x^*, u^*) \gets \Phi(\balpha)$
+\STATE $u \gets u^* - K_\mu(\balpha) \, (x - x^*)$
+  \hfill\textit{${\sim}260$ ops}
+\STATE \textit{--- Optional: IPM refinement ---}
+\FOR{$k = 1, \ldots, K_{\mathrm{IPM}}$}
+  \STATE $H_\mu \gets$ \eqref{eq:barrier_hess}
+    at current $u^{(k-1)}$
+  \STATE Riccati pass with updated $R_\mu$
+    $\to \delta u$
+  \STATE $u^{(k)} \gets u^{(k-1)} + \eta \, \delta u$
+    \hfill\textit{Newton step}
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+\textbf{$\alpha$-dependent conservatism.}
+The barrier Hessian~\eqref{eq:barrier_hess} depends on
+$\balpha$ through $u^*(\balpha)$.
+At hover ($\balpha = 0$), the four motors produce equal
+thrust at midrange, and $H_\mu$ is moderate in all channels.
+At aggressive maneuvers (large $\|a\|$), some motors approach
+saturation and $H_\mu$ becomes large in those channels,
+automatically increasing conservatism precisely where
+constraints are tightest.
+The scheduling variable $\balpha$ thus simultaneously
+parameterizes the linearization, the equilibrium,
+\emph{and} the constraint tightness---all through a single
+four-dimensional quantity.
+
+\textbf{Online IPM refinement.}
+For tighter constraint satisfaction, $K_{\mathrm{IPM}}$
+Newton steps can be performed online
+(lines~14--18 of Algorithm~\ref{alg:barrier}).
+The initial iterate $u^{(0)}$ is the output of line~12---the
+barrier-augmented template's zero-iteration output, which is
+already near-feasible by construction.
+Each Newton step recomputes the barrier
+Hessian~\eqref{eq:barrier_hess} at the current iterate
+$u^{(k-1)}$ (not at the equilibrium) and solves one Riccati
+backward pass with the updated $R_\mu$---the same
+$O(n^2)$ cost per step as an ADMM iteration.
+Unlike ADMM (linear convergence), the Newton--IPM iteration
+converges \emph{quadratically} near the
+solution~\cite{boyd2004,jordana2023}: for moderate constraint
+violations (the warm start is already near-feasible),
+2--3 iterations typically reduce the KKT residual
+below solver tolerance.
+
+\textbf{Extended equivalence chain.}
+The five variants now form a complete hierarchy:
+\begin{align}\label{eq:full_chain}
+  &\text{Online Relin}
+  \xrightarrow{\text{cache}}
+  \text{Flat Template}
+  \xrightarrow{K\to 0} \notag \\
+  &\text{Barrier Templ.}
+  \xrightarrow{\mu\to 0}
+  \text{Analytic Templ.}
+  \xrightarrow{\text{1st}}
+  \text{Gain Sched.}
+\end{align}
+The Barrier Template sits between the Flat Template
+(hard constraints via $K$ ADMM iterations) and the
+Analytic Template (no constraints, clip only):
+it provides soft constraint satisfaction at zero online
+iterations, with optional IPM refinement for hard guarantees.
+Setting $\mu = 0$ recovers the unconstrained Analytic
+Template; increasing $\mu$ trades tracking aggressiveness
+for constraint margin.

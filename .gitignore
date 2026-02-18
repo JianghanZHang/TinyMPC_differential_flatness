@@ -1,4 +1,29 @@
-# Python cache files
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.bbl
+*.blg
+missfont.log
+
+# IDE
+.vscode/
+.idea/
+
+# Claude
+.claude/

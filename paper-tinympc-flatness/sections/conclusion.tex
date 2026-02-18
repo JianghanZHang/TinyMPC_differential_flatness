@@ -1,0 +1,26 @@
+% ================================================================
+\section{Conclusion}\label{sec:conclusion}
+
+We presented three extensions of TinyMPC that exploit differential
+flatness to adapt the linearization point along a trajectory.
+The Flat Template MPC precomputes a family of DARE caches indexed
+by the flat parameter $\balpha$, preserving TinyMPC's
+matrix-inversion-free online structure while achieving
+faster ADMM convergence.
+The Analytic Template further reduces the online computation
+to ${\sim}260$ arithmetic operations by replacing ADMM
+with a first-order gain interpolation.
+The Barrier-Augmented Template absorbs log-barrier constraint
+penalties into the DARE cache, providing inherent constraint
+awareness at zero additional online cost, with optional
+Newton--IPM refinement for hard constraint satisfaction
+at quadratic convergence.
+Preliminary simulation results demonstrate that
+the flat-parameterized variants
+maintain tracking accuracy comparable to online relinearization
+at substantially lower computational cost.
+Future work includes C implementation targeting the
+Crazyflie 2.1 STM32F405 microcontroller,
+FPGA synthesis of the Analytic Template datapath,
+numerical validation of the Barrier-Augmented Template,
+and extension to wind-disturbance rejection.

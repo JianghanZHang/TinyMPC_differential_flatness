@@ -1,0 +1,167 @@
+% ================================================================
+\section{Theoretical Connections to Optimal Control Theory}
+\label{sec:appendix_theory}
+
+This appendix situates the zero-iteration controller within
+a broader theoretical landscape, drawing connections to three
+companion analyses: the tunnel--threshold--turbulence (TTT)
+framework for iterative optimal control~\cite{zhang2026ttt},
+the renormalization-group (RG) interpretation of the DARE
+iteration~\cite{zhang2026ym}, and the adjoint--barrier--controllability
+(ABC) analysis of constrained optimal control~\cite{zhang2026abc}.
+These connections explain \emph{why} the barrier-augmented
+zero-iteration controller cannot enforce absolute state constraints
+and suggest concrete paths beyond this limitation.
+
+\subsection{The Zero-Iteration Controller as a Seed}
+\label{sec:seed}
+
+The zero-iteration control law
+$u = u^*(\balpha) - K(\balpha)\,\delta x$
+is a \emph{seed} in the sense of~\cite{zhang2026ttt}:
+a fixed-point controller at one operating point
+(the reference trajectory), extended to nearby points
+by first-order sensitivity.
+
+TTT's main theorem establishes four equivalent conditions:
+\begin{equation}\label{eq:ttt_equiv}
+  \text{bounded } P_j
+  \;\Longleftrightarrow\;
+  \text{spectral gap} > 0
+  \;\Longleftrightarrow\;
+  \text{Lyapunov descent}
+  \;\Longleftrightarrow\;
+  \text{tunnel exists.}
+\end{equation}
+Our DARE solution $P_\infty$ is the bounded cost-to-go
+guaranteed by the first condition.
+The ``tunnel'' is the sublevel set
+$\mathcal{T} = \{x : \frac{1}{2} x^\top P_\infty x \leq V_{\max}\}$
+inside which the seed controller maintains
+exponential contraction---the region of attraction
+whose radius scales as
+$r \sim \|P_\infty\|^{-1/2}$.
+
+From the Yang--Mills perspective~\cite{zhang2026ym},
+the DARE iteration $P_{j+1} = f(P_j)$ is a discrete
+\emph{renormalization group flow}: each step integrates
+out one ``scale'' of the control problem
+(one stage of the finite-horizon cost).
+Convergence of $P_j \to P_\infty$ is the analogue
+of the mass gap in Yang--Mills theory---the spectral gap
+between the largest and second-largest eigenvalue of the
+closed-loop transition matrix.
+The contraction rate
+$\bar\rho(A_{\mathrm{cl}}) < 1$ (Proposition~\ref{prop:contraction})
+is precisely this gap.
+
+\subsection{Why Zero-Iteration Cannot Enforce Absolute Constraints}
+\label{sec:why_barrier_fails}
+
+The circle-in-square experiment
+(Table~\ref{tab:circle}) reveals that the barrier-augmented
+controller violates the square bound by the same 88\,mm as the
+unconstrained analytic controller.
+We now explain this result through three complementary lenses.
+
+\textbf{Costate rotation (ABC).}
+The gain $K(\balpha)$ is the costate $\nabla V$ evaluated at
+the reference (equilibrium) point~\cite{zhang2026abc}.
+The full costate \emph{field} $\nabla V(x)$ varies spatially:
+near a constraint boundary, $\nabla V$ rotates to point
+away from the boundary, encoding the directional information
+needed to steer the trajectory into the feasible region.
+A constant-gain approximation $K \approx \nabla V(x^*)$ cannot
+capture this rotation, regardless of the barrier parameter $\mu$.
+The barrier Hessian~\eqref{eq:barrier_hess_x} modifies the
+\emph{magnitude} of the gain (increasing the effective state cost
+near constraints) but not its \emph{direction}---and it is the
+directional information that determines constraint satisfaction
+when the reference lies outside the feasible region.
+
+\textbf{UV--IR decoupling (Yang--Mills).}
+In the language of~\cite{zhang2026ym}, the barrier modifies
+the ``UV source term'' $Q_\mu$ (the error-state cost in the
+DARE) but cannot create ``IR contraction''
+(the iterative projection that enforces absolute constraints
+over the prediction horizon).
+The zero-iteration controller operates entirely in the UV
+regime---local, single-point, based on the equilibrium
+Hessian.
+Hard constraint satisfaction is an IR property: it requires
+the full cost-to-go landscape $V(x)$, not just its Hessian
+$\nabla^2 V(x^*)$ at one point.
+Both regimes must cooperate---UV provides the seed, IR provides
+the tunnel.
+
+\textbf{Seed vs.\ tunnel (TTT).}
+The seed alone does not constitute a tunnel.
+The tunnel is constructed by iterative refinement
+(ADMM iterations, in our setting) that progressively
+tightens the constraint satisfaction.
+This is precisely what the ADMM variants achieve via per-step
+horizon bounds (Section~\ref{sec:circle_square}): each
+iteration projects the predicted trajectory toward the
+feasible set, building the tunnel one iteration at a time.
+The zero-iteration controller, by definition, performs
+no such construction.
+
+\subsection{Beyond Zero-Iteration: Path Integral Extensions}
+\label{sec:extensions}
+
+Three paths to constraint-aware real-time control, ordered by
+computational budget:
+
+\textbf{1.\ MPPI-seed hybrid}
+($O(N_s \cdot n) \approx 1500$ ops).
+Use $K(\balpha)$ as the base policy and sample $N_s \approx 10$
+perturbations around the seed trajectory.
+Weight each sample by the Boltzmann factor
+$e^{-\beta \cdot J}$ where $J$ includes a constraint
+penalty~\cite{williams2017}.
+The weighted average creates a soft ``tunnel'' via ensemble
+averaging: samples that violate constraints receive low weight.
+This is deterministic-time (no convergence loop) and respects
+the TTT structure: the seed provides the center of the sampling
+distribution, while the Boltzmann weighting constructs a
+statistical approximation to the tunnel boundary.
+
+\textbf{2.\ Costate lookup table}
+($O(n \cdot m)$ + table lookup $\approx 500$ ops).
+Precompute the costate field
+$\nabla V(x)$ at a grid of positions near constraint
+boundaries.
+Online, look up the nearest costate vector and correct
+$K(\balpha)$ with the directional information.
+This adds ABC's ``missing ingredient''---the costate
+\emph{field} rather than a single-point costate---to the
+zero-iteration controller.
+The lookup table size scales with the number of constraint
+boundaries, not the state dimension, keeping the approach
+compact for box-constrained systems.
+
+\textbf{3.\ Constraint-shaped terminal cost}
+($O(n \cdot m) \approx 260$ ops, same budget as the
+Analytic Template).
+Instead of adding the barrier Hessian at the equilibrium,
+design $P_\infty$ via a DARE whose terminal cost encodes
+the constraint geometry along the predicted trajectory.
+This requires a one-step prediction
+$x_{k+1} = A_d x_k + B_d u_k$ before the gain lookup
+but otherwise preserves the ${\sim}260$-operation datapath.
+The key difference from the current barrier approach:
+the terminal cost is evaluated along the trajectory,
+not at the equilibrium---providing the ``IR information''
+that the equilibrium-only barrier lacks.
+
+These three extensions correspond to TTT's nested game
+structure~\cite{zhang2026ttt}: the MPPI-seed hybrid
+(outer game, sampling/exploration), costate lookup
+(middle game, adjoint/directional information), and
+constraint-shaped terminal cost (inner game, cost landscape
+shaping).
+The tunnel emerges from the cooperation of all three
+mechanisms, not from any single one---mirroring the
+experimental finding that no single zero-iteration mechanism
+(barrier, clipping, or gain interpolation) suffices for
+hard constraint satisfaction.
