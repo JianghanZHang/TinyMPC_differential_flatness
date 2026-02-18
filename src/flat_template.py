@@ -135,13 +135,16 @@ class FlatTemplateMPC:
     #  ADMM solver  (mirrors TinyMPC.solve_admm)
     # ------------------------------------------------------------------ #
 
-    def solve(self, x0, alpha, K_iters=None):
+    def solve(self, x0, alpha, K_iters=None,
+              xmin_horizon=None, xmax_horizon=None):
         """Algorithm 1: ADMM solve with alpha-specific cache.
 
         Args:
             x0: (12,)  initial error state
             alpha: (4,) current flat parameter
             K_iters: override for max ADMM iterations
+            xmin_horizon: (12, N) per-step state lower bounds (optional)
+            xmax_horizon: (12, N) per-step state upper bounds (optional)
 
         Returns:
             x: (12, N)   predicted state trajectory
@@ -192,9 +195,18 @@ class FlatTemplateMPC:
             # --- slack update ---
             for j in range(self.N - 1):
                 z[:, j] = np.clip(u[:, j] + y[:, j], self.umin, self.umax)
-                v[:, j] = np.clip(x[:, j] + g[:, j], self.xmin, self.xmax)
-            v[:, self.N - 1] = np.clip(
-                x[:, self.N - 1] + g[:, self.N - 1], self.xmin, self.xmax)
+                if xmin_horizon is not None:
+                    v[:, j] = np.clip(x[:, j] + g[:, j],
+                                      xmin_horizon[:, j], xmax_horizon[:, j])
+                else:
+                    v[:, j] = np.clip(x[:, j] + g[:, j], self.xmin, self.xmax)
+            if xmin_horizon is not None:
+                v[:, self.N - 1] = np.clip(
+                    x[:, self.N - 1] + g[:, self.N - 1],
+                    xmin_horizon[:, self.N - 1], xmax_horizon[:, self.N - 1])
+            else:
+                v[:, self.N - 1] = np.clip(
+                    x[:, self.N - 1] + g[:, self.N - 1], self.xmin, self.xmax)
 
             # --- dual update ---
             for j in range(self.N - 1):

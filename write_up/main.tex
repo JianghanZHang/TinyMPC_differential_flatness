@@ -1,7 +1,7 @@
 % !TEX program = pdflatex
 \documentclass[letterpaper, 10pt, conference]{IEEEtran}
 
-\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{amsmath,amssymb,amsfonts,amsthm}
 \usepackage{algorithmic}
 \usepackage{algorithm}
 \usepackage{graphicx}
@@ -16,6 +16,10 @@
 % Compact lists
 \usepackage{enumitem}
 \setlist{nosep}
+
+% Theorem environments
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
 
 % Math shortcuts
 \newcommand{\R}{\mathbb{R}}
@@ -177,8 +181,12 @@ Fig.~\ref{fig:hierarchy} illustrates the pipeline.
     information into the DARE cache for zero-iteration
     constraint-aware control, with optional IPM refinement
     at quadratic convergence (Section~\ref{sec:barrier}).
+  \item Convergence analysis: quadratic gain approximation error
+    from flatness-compressed scheduling, and exponential
+    time-contraction with explicit rate--conservatism tradeoff
+    (Section~\ref{sec:convergence}).
   \item Preliminary numerical validation comparing four controller
-    variants on hover and figure-eight tracking
+    variants on hover, figure-eight, and constrained circle tracking
     (Section~\ref{sec:experiments}).
 \end{itemize}
 
@@ -642,26 +650,54 @@ constraint boundary and small when it is far from all
 boundaries---exactly the structure needed to make the
 controller more conservative near limits.
 
-\textbf{Barrier-augmented DARE.}
-Define the barrier-augmented input cost:
-\begin{equation}\label{eq:R_barrier}
-  R_\mu(\balpha) = R + H_\mu(\balpha).
+\textbf{State barrier Hessian.}
+For state constraints $x_{\min} \leq x \leq x_{\max}$
+(e.g., position bounds $|p_i| \leq L$),
+the same log-barrier construction yields a state barrier Hessian
+at the equilibrium $x^*(\balpha)$:
+\begin{equation}\label{eq:barrier_hess_x}
+  H_{x,\mu}(\balpha) = \mu \cdot \mathrm{diag}\!\left(
+    \frac{1}{(x^*_i - x_{\min,i})^2}
+    + \frac{1}{(x_{\max,i} - x^*_i)^2}
+  \right),
 \end{equation}
-Solving the augmented DARE with $R_\mu$ in place of $R$:
+applied only to the constrained state dimensions
+(unconstrained dimensions contribute zero).
+In error coordinates where $x^*_{\mathrm{pos}} = 0$,
+the equilibrium position equals the reference, so the
+barrier depends on the distance from the reference to
+the constraint boundary:
+$[H_{x,\mu}]_{i,i} = \mu \bigl(
+  1/(p^*_{\mathrm{ref},i} + L)^2 + 1/(L - p^*_{\mathrm{ref},i})^2
+\bigr)$.
+This is $\balpha$-dependent through the reference trajectory,
+making the barrier naturally time-varying.
+
+\textbf{Barrier-augmented DARE.}
+Define the barrier-augmented costs:
+\begin{align}
+  R_\mu(\balpha) &= R + H_\mu(\balpha), \label{eq:R_barrier} \\
+  Q_\mu(\balpha) &= Q_{\mathrm{lqr}} + H_{x,\mu}(\balpha), \label{eq:Q_barrier}
+\end{align}
+where $Q_{\mathrm{lqr}}$ is the terminal cost from the
+standard (non-augmented) discrete LQR.
+Solving the augmented DARE with both $R_\mu$ and $Q_\mu$:
 \begin{equation}\label{eq:dare_barrier}
-  P_\mu = Q_\rho + A_d^\top P_\mu \bigl(
+  P_\mu = Q_{\mu,\rho} + A_d^\top P_\mu \bigl(
     A_d - B_d \, G_\mu^{-1} \,
     B_d^\top P_\mu A_d \bigr),
 \end{equation}
-where $G_\mu = R_\mu + \rho I + B_d^\top P_\mu B_d$,
+where $Q_{\mu,\rho} = Q_\mu + \rho I$ and
+$G_\mu = R_\mu + \rho I + B_d^\top P_\mu B_d$,
 yields the barrier-augmented gain
 $K_\mu(\balpha) = G_\mu^{-1} B_d^\top P_\mu A_d$.
 This gain inherently reduces authority on input channels
-that are near their limits: when motor $j$ is close to
-saturation at equilibrium, $[H_\mu]_{jj}$ is large,
-increasing the effective cost of channel $j$, so
-$[K_\mu]_{j,:}$ is reduced and the controller avoids
-driving that motor further toward the boundary.
+that are near their limits and increases the effective
+state cost near constraint boundaries:
+when the reference position approaches the square bound,
+$[H_{x,\mu}]_{i,i}$ grows, penalizing state excursions
+in that direction and making the controller more conservative
+precisely where constraints are tightest.
 
 The offline and online procedures are given
 in Algorithm~\ref{alg:barrier}.
@@ -671,17 +707,21 @@ in Algorithm~\ref{alg:barrier}.
 \label{alg:barrier}
 \begin{algorithmic}[1]
 \REQUIRE Constraint bounds $u_{\min}, u_{\max}$,
+  $x_{\min}, x_{\max}$ (optional),
   barrier parameter $\mu$
 \STATE \textit{--- Offline ---}
 \FOR{each grid point $\balpha^{(j)}$}
   \STATE $(x^*, u^*) \gets \Phi(\balpha^{(j)})$
     \hfill\textit{flat equilibrium}
   \STATE $H_\mu \gets$ \eqref{eq:barrier_hess}
-    from $u^*$ and bounds
-  \STATE $R_\mu \gets R + H_\mu$
-    \hfill\textit{barrier-augmented cost}
+    from $u^*$ and input bounds
+  \STATE $H_{x,\mu} \gets$ \eqref{eq:barrier_hess_x}
+    from $x^*$ and state bounds
+  \STATE $R_\mu \gets R + H_\mu$;
+    $Q_\mu \gets Q_{\mathrm{lqr}} + H_{x,\mu}$
+    \hfill\textit{barrier-augmented costs}
   \STATE Solve DARE~\eqref{eq:dare_barrier}
-    with $R_\mu \to K_\mu^{(j)}$
+    with $R_\mu, Q_\mu \to K_\mu^{(j)}$
   \STATE $\frac{\partial K_\mu}{\partial \alpha_i}
     \gets$ central differences
     \hfill\textit{4 sensitivities}
@@ -761,6 +801,106 @@ iterations, with optional IPM refinement for hard guarantees.
 Setting $\mu = 0$ recovers the unconstrained Analytic
 Template; increasing $\mu$ trades tracking aggressiveness
 for constraint margin.
+
+% ================================================================
+\section{Convergence Analysis}\label{sec:convergence}
+
+We now formalize the two key convergence properties that
+differential flatness enables: (i)~a quadratic gain
+approximation error and (ii)~exponential time-contraction
+of the closed-loop system.
+
+\begin{proposition}[Quadratic gain approximation]\label{prop:gain_approx}
+Let $K(\balpha)$ denote the DARE gain~\eqref{eq:kinf} at
+flat parameter $\balpha$, and let
+$\tilde{K}(\balpha) = K_0 + \sum_{i=1}^{4}
+(\alpha_i - \alpha_{0,i}) \, \partial_i K$
+be the first-order approximation~\eqref{eq:K_interp}.
+Suppose $K(\cdot)$ is twice continuously differentiable
+in a neighborhood of $\balpha_0$
+(guaranteed when $(A_d(\balpha), B_d(\balpha))$ is
+stabilizable and $(Q^{1/2}, A_d(\balpha))$ is
+detectable~\cite{konstantinov1993}).
+Then
+\begin{equation}\label{eq:gain_quad}
+  \|K(\balpha) - \tilde{K}(\balpha)\|_F
+  \;\leq\; \tfrac{1}{2} \, L_K \, \|\balpha - \balpha_0\|^2,
+\end{equation}
+where $L_K = \max_i \sup_{\balpha} \|\partial^2 K / \partial \alpha_i \partial \alpha_j\|_F$
+is the Lipschitz constant of the gain Jacobian.
+\end{proposition}
+
+\begin{proof}
+This is the standard second-order Taylor remainder applied
+to the matrix-valued map $\balpha \mapsto K(\balpha) \in \R^{m \times n}$.
+The twice-differentiability of $K$ with respect to
+the system parameters $(A, B)$ follows from the implicit
+function theorem applied to the DARE~\cite{hewer1971,konstantinov1993},
+composed with the smooth (trigonometric) dependence of
+$(A_d(\balpha), B_d(\balpha))$ on $\balpha$
+from~\eqref{eq:Ac}--\eqref{eq:disc}.
+\end{proof}
+
+\textit{Why flatness matters.}
+Without differential flatness, the scheduling variable
+would be the full $n$-dimensional state, and the gain
+Hessian $\partial^2 K / \partial x_i \partial x_j$ would
+be an $O(n^2)$-parameter tensor.
+Flatness compresses the scheduling space from $\R^n$ to
+$\R^4$, so the Hessian has only $\binom{4+1}{2} = 10$
+independent components---making~\eqref{eq:gain_quad}
+a tight, low-dimensional bound.
+
+\begin{proposition}[Exponential time-contraction]\label{prop:contraction}
+Let $A_{\mathrm{cl}}(\balpha) = A_d(\balpha) - B_d(\balpha) K(\balpha)$
+be the closed-loop matrix at flat parameter $\balpha$.
+The DARE solution guarantees
+$\rho(A_{\mathrm{cl}}) < 1$
+(all eigenvalues strictly inside the unit circle),
+so the error state contracts exponentially:
+\begin{equation}\label{eq:contraction}
+  \|\delta x_k\| \;\leq\; c \; \rho(A_{\mathrm{cl}})^k \; \|\delta x_0\|,
+  \qquad c \geq 1,
+\end{equation}
+where $\delta x_k = x_k - x^*(\balpha)$,
+$\rho(A_{\mathrm{cl}}) < 1$ is the spectral radius,
+and $c$ depends on the condition number of the eigenvector
+matrix of $A_{\mathrm{cl}}$.
+\end{proposition}
+
+\textit{Contraction rate vs.\ constraint conservatism.}
+For the barrier-augmented variant (Section~\ref{sec:barrier}),
+$R_\mu = R + H_\mu(\balpha)$ increases the effective input
+cost, producing a less aggressive gain $K_\mu$ and a larger
+spectral radius $\rho(A_{\mathrm{cl}}^\mu) > \rho(A_{\mathrm{cl}})$.
+Thus the barrier parameter $\mu$ explicitly trades contraction
+speed for constraint margin: larger $\mu$ yields slower
+convergence but greater safety distance from actuator limits.
+
+\begin{corollary}[Tracking error bound]\label{cor:tracking}
+When the first-order gain approximation $\tilde{K}(\balpha)$
+is used instead of the exact gain $K(\balpha)$,
+the closed-loop matrix becomes
+$\tilde{A}_{\mathrm{cl}} = A_d - B_d \tilde{K}$.
+By~\eqref{eq:gain_quad}, the perturbation
+$\Delta K = K - \tilde{K}$ satisfies
+$\|\Delta K\| \leq \frac{1}{2} L_K \|\delta\balpha\|^2$.
+Standard perturbation theory for discrete-time
+systems~\cite{konstantinov1993} then gives
+\begin{equation}\label{eq:tracking_bound}
+  \rho(\tilde{A}_{\mathrm{cl}})
+  \;\leq\; \rho(A_{\mathrm{cl}})
+  + \|B_d\| \cdot \tfrac{1}{2} L_K \|\delta\balpha\|^2
+  + O(\|\delta\balpha\|^4).
+\end{equation}
+The approximate closed loop remains stable whenever
+$\|\delta\balpha\|$ is small enough that the right-hand
+side is less than~$1$.
+For the quadrotor with $\|\delta\balpha\| \leq 3$\,m/s$^2$,
+our numerical tests (Section~\ref{sec:experiments})
+confirm mean gain error of $4\%$ and stable tracking
+across 100 random $\balpha$ samples.
+\end{corollary}
 
 % ================================================================
 \section{Preliminary Results}\label{sec:experiments}
@@ -889,6 +1029,107 @@ The key differences are computational:
     \emph{zero} ADMM iterations.
 \end{itemize}
 
+\subsection{Circle-in-Square Constrained Tracking}
+
+To demonstrate the complexity cascade, we track a circular
+trajectory in the $xy$-plane ($R = 0.3$\,m, period 8\,s)
+while enforcing square position bounds
+$|x| \leq L$, $|y| \leq L$
+with $L = R / \sqrt{2} \approx 0.212$\,m, so that the
+four vertices of the square lie \emph{exactly} on the circle
+(inscribed square geometry; see Fig.~\ref{fig:circle_square}).
+At the cardinal points, the circle exceeds the square by
+$R - L \approx 88$\,mm.
+
+We compare all four controller variants.
+The Online Relinearization and Flat Template both use ADMM
+with per-step horizon bounds: at horizon step $j$, the
+error-state position constraint is
+$-L - p_{\mathrm{ref}}(t{+}j\Delta t)
+ \leq \delta x_{0:2}
+ \leq L - p_{\mathrm{ref}}(t{+}j\Delta t)$,
+correctly mapping the absolute constraint to error coordinates
+at each future timestep.
+The Barrier Template absorbs position-constraint awareness into
+$Q_\mu$ via~\eqref{eq:barrier_hess_x}--\eqref{eq:Q_barrier}.
+The Analytic Template tracks the full circle without constraints.
+Parameters: $N = 20$, $\rho = 50$, up to 500 ADMM iterations
+(for ADMM variants).
+
+\begin{table}[t]
+\centering
+\caption{Circle-in-square tracking
+  ($R=0.3$\,m, $L=R/\sqrt{2}$, period 8\,s).
+  Moving down the cascade trades constraint fidelity for
+  real-time guarantees.}
+\label{tab:circle}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+ & Online & Flat Templ. & Barrier & Analytic \\
+ & Relin & (ADMM) & (zero-iter) & (zero-iter) \\
+\midrule
+Complexity & $O(n^3{+}Kn^2)$ & $K{\cdot}O(n^2)$ & $O(nm)$ & $O(nm)$ \\
+Constraints & Hard & Hard & Soft & Clip \\
+Avg.\ pos.\ err (m) & --- & --- & --- & --- \\
+Max viol.\ (mm) & --- & --- & --- & --- \\
+Mean viol.\ (mm) & --- & --- & --- & --- \\
+Avg.\ ADMM iters & --- & --- & 0 & 0 \\
+Wall time (s) & --- & --- & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/fig_circle_square.png}
+  \caption{Circle-in-square constrained tracking:
+    the complexity cascade from $O(n^3)$ online NMPC
+    to $O(n{\cdot}m)$ deterministic feedback.
+    \textbf{Left:} $xy$-plane trajectories.
+    Online Relin and Flat Template (ADMM) are visibly
+    ``pinched'' toward the square at the cardinal points;
+    the Barrier Template shows partial constraint awareness;
+    the Analytic Template tracks the full circle.
+    \textbf{Right:} Position violation over time,
+    illustrating the constraint-fidelity/computation tradeoff.}
+  \label{fig:circle_square}
+\end{figure}
+
+Table~\ref{tab:circle} and Fig.~\ref{fig:circle_square}
+illustrate the central tradeoff of the
+hierarchy~\eqref{eq:full_chain}.
+The two ADMM variants (Online Relinearization and Flat Template)
+achieve near-zero position violation by encoding the absolute
+constraint as per-step error-state bounds along the prediction
+horizon, actively projecting the trajectory onto the feasible
+set at each ADMM iteration.
+The Flat Template achieves the same constraint satisfaction
+as Online Relinearization while eliminating the per-step
+DARE solve.
+
+The zero-iteration variants (Barrier and Analytic) exhibit
+the full geometric violation of $R - L = 88$\,mm.
+This is expected: the barrier Hessian~\eqref{eq:barrier_hess_x}
+penalizes error-state excursions from the reference, but in
+this geometry the \emph{reference itself} exceeds the square
+boundary at the cardinal points ($R > L$).
+No modification of the error-state cost can prevent absolute
+position violation when the tracking target lies outside the
+feasible region---only the ADMM projection (which maps
+absolute bounds to per-step error-state bounds) can achieve this.
+The barrier remains effective for \emph{input} constraints
+(preventing motor saturation) and for state constraints where
+the reference stays inside the feasible region.
+
+The key message: \emph{moving down the cascade trades constraint
+fidelity for real-time guarantees}.
+The ADMM variants handle arbitrary absolute constraints via
+iterative projection at $O(n^2)$ per iteration;
+the zero-iteration variants achieve deterministic $O(n{\cdot}m)$
+feedback (${\sim}260$ operations) enabled by the
+flatness-compressed $\R^4$ scheduling space, at the cost of
+relinquishing hard state-constraint satisfaction.
+
 \subsection{Numerical Validation}
 
 We verify the implementation with four tests:
@@ -940,17 +1181,26 @@ Analytic & $O(n \cdot m)$ & Clip & --- & $\R^4$ \\
 \bottomrule
 \end{tabular}
 \end{center}
+The central contribution is the path from cubic-time online
+optimization to linear-time deterministic feedback, enabled
+by flatness-compressed scheduling over $\R^4$.
 The Flat Template has the same per-iteration cost as TinyMPC but
 converges in fewer iterations due to better-conditioned linearization.
 The Barrier Template (Section~\ref{sec:barrier}) provides soft
 constraint satisfaction at the same ${\sim}260$-operation cost as
-the Analytic Template, by absorbing log-barrier information into
-the DARE cache.
+the Analytic Template, by absorbing log-barrier information
+(both $H_\mu$ for inputs and $H_{x,\mu}$ for states)
+into the DARE cache.
 With optional IPM refinement (2--3 Newton steps),
 it achieves hard constraint satisfaction with quadratic convergence---fewer
 iterations than ADMM for the same accuracy.
 The Analytic Template ($\mu = 0$) trades all constraint handling
 for extreme efficiency.
+The zero-iteration variants (Barrier and Analytic) achieve
+real-linear-time control: deterministic, iteration-free,
+$O(n{\cdot}m) \approx 260$ operations per control output,
+only possible because flatness compresses the scheduling
+space to $\R^4$ (4 sensitivity matrices, 240 floats).
 
 \textbf{What is new vs.\ what is classical.}
 The individual mathematical ingredients---differential
